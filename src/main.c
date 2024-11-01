@@ -32,15 +32,17 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
+#include <pthread.h>
 #include <getopt.h>
 #include <signal.h>
 #include <errno.h>
+
+#include "socks5.h"
 
 #define MAX_OPEN (8192)
 
 #define TYPE_CLI (1)
 #define TYPE_TRGT (2)
-#define CHUNK_SZ (4096)
 
 extern char *optarg;
 extern int optind, opterr, optopt;
@@ -55,6 +57,8 @@ extern int optind, opterr, optopt;
 
 static int connections[MAX_OPEN][5];
 static int open_connection_count=0;
+static int max_open=0;
+static int server_timeout=20;
 int serverfd=-1, epollfd=-1;
 static sig_atomic_t interrupt=0;
 
@@ -69,6 +73,7 @@ void version();
 void daemonize();
 void sigint_handle(int);
 void handle_event(struct epoll_event *);
+void timeout_proc(void *);
 
 int main(int argc,char *argv[])
 {
@@ -90,7 +95,7 @@ int main(int argc,char *argv[])
 	char listen_addr[256]="127.0.0.1";
 	unsigned short port=1080;
 	struct epoll_event ev, events[128];
-	int max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : MAX_OPEN);
+	max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : MAX_OPEN);
 	// decrement max open 
 	max_open--; // STDIN_FILENO
 	max_open--; // STDOUT_FILENO
@@ -134,8 +139,11 @@ int main(int argc,char *argv[])
 	}
 	max_open--; // socket fd
 	// set sock opttion reuseaddr
-	int optval=1;
-	setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof optval);
+	socklen_t optval=1;
+	if(setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof optval) < 0) {
+		fprintf(stderr, "setsockopt failed: %s\n", strerror(errno));
+		goto exit_failure;
+	}
 
 	// register addr of socket
 	server_addr.sin_family=AF_INET;
@@ -168,10 +176,18 @@ int main(int argc,char *argv[])
 		goto exit_failure;
 	}
 	// loop forever
+	pthread_t tid;
+	if(pthread_create(&tid, NULL, timeout_proc, NULL) < 0) {
+		fprintf(stderr, "pthread_create failed: %s\n", strerror(errno));
+		goto exit_failure;
+	}
 	for(;;) {
 		// wait until there is an up coming event
+		if(interrupt) break; // handle SIGINT
 		int nfds = epoll_wait(epollfd, &events, sizeof events/sizeof events[0], -1);
 		if(nfds==-1) {
+			if(errno==EINTR)
+				continue;
 			fprintf(stderr, "epoll_wait failed: %s\n", strerror(errno));
 			goto exit_failure;
 		}
@@ -196,7 +212,7 @@ int main(int argc,char *argv[])
 				// set open flag
 				connections[clifd][0]=1;
 				connections[clifd][1]=TYPE_CLI;
-				connections[clifd][2]=0; // FLAG FOR INIT SOCKS5 negotiation
+				connections[clifd][2]=SOCKS5_STATE_RCVBUF; // FLAG FOR INIT SOCKS5 negotiation
 				connections[clifd][3]=0; // fd of target host
 				connections[clifd][4]=time(NULL);
 
@@ -215,6 +231,7 @@ int main(int argc,char *argv[])
 			}
 		}
 	}
+	pthread_join(tid, NULL);
 	exit(EXIT_SUCCESS);
 exit_failure:
 	cleanup();
@@ -280,9 +297,8 @@ void daemonize()
 
 void init_connections() 
 {
-	for(int i=0;i < MAX_OPEN; i++) {
+	for(int i=0;i < MAX_OPEN; i++) 
 		memset(&connections[i], 0, sizeof connections[i]);
-	}
 }
 
 void cleanup() 
@@ -309,7 +325,7 @@ int sock_recv(int fd, unsigned char *buf, size_t len)
 	int ret=0;
 	while(1) {
 		ret = read(fd, buf, len);
-		if(ret<0 && errno==EAGAIN || errno==EWOULDBLOCK)
+		if(ret<0 && errno==EAGAIN || errno==EWOULDBLOCK) 
 			continue;
 		break;
 	}
@@ -327,9 +343,7 @@ void handle_event(struct epoll_event *event)
 	if(!connections[event->data.fd][0])
 		return; // not an open connection
 	// check for socket errors
-	int optval;
-	getsockopt(event->data.fd, SOL_SOCKET, SO_ERROR, &optval, sizeof optval);
-	if(optval > 0 && event->events&EPOLLERR || event->events&EPOLLRDHUP || event->events&EPOLLHUP) {
+	if( event->events&EPOLLERR || event->events&EPOLLRDHUP || event->events&EPOLLHUP) {
 		connection_close(event->data.fd);
 	}
     // check wether socks5 cli or target host
@@ -337,23 +351,57 @@ void handle_event(struct epoll_event *event)
 	char buf[256] = {0};
 	int len=0;
 	int total=0;
-	while((len=sock_recv(event->data.fd, buf, sizeof buf)) > 0) {
-		total += len;
+	if(connections[event->data.fd][2]==SOCKS5_STATE_RCVBUF) {
+		while((len=sock_recv(event->data.fd, buf, sizeof buf)) > 0) 
+			total += len;
+		if(len<0) {
+			fprintf(stderr, "sock_recv failed: %s\n", strerror(errno));
+			connection_close(event->data.fd);
+			return;
+		}
+
+		fprintf(stdout, "Received data len: %d bytes.\n", total);
+		connections[event->data.fd][2]=SOCKS5_STATE_SNDBUF;
 	}
-	if(len<0) {
-		fprintf(stderr, "sock_recv failed: %s\n", strerror(errno));
-		connection_close(event->data.fd);
-		return;
+	else if(connections[event->data.fd][2]==SOCKS5_STATE_SNDBUF) {
+		strcpy(buf, "GOT YA!");
+		len = sock_send(event->data.fd, buf, strlen(buf));
+		if(len < 0) {
+			fprintf(stderr, "sock_send failed: %s\n", strerror(errno));
+            connection_close(event->data.fd);
+            return;
+		}
+        fprintf(stdout, "Sent data len: %d bytes.\n", len);
+        connections[event->data.fd][2]=SOCKS5_STATE_RCVBUF;
 	}
-	fprintf(stdout, "Received data len: %d bytes.\n", total);
 }
 
 void connection_close(int fd) {
-	connections[fd][0]=0;
-    connections[fd][1]=0;
-    connections[fd][2]=0;
-    connections[fd][3]=0;
-	connections[fd][4]=0;
+	__sync_lock_test_and_set(&connections[fd][0], 0);
+    __sync_lock_test_and_set(&connections[fd][1], 0);
+    __sync_lock_test_and_set(&connections[fd][2], 0);
+    __sync_lock_test_and_set(&connections[fd][3], 0);
+	__sync_lock_test_and_set(&connections[fd][4], 0);
 	close(fd);
+	__sync_fetch_and_sub(&open_connection_count, 1);
+}
+
+void timeout_proc(void *args) {
+	for(;;) {
+		if(interrupt) 
+			break;
+		sleep(1);
+		for(int i=0;i < MAX_OPEN; i++) {
+			// currently just handle open fds
+			if(connections[i][0]) {
+				socklen_t slen=0;
+				if(getsockopt(i, SOL_SOCKET, SO_ERROR, &slen, sizeof slen) <  0)
+					if(errno=EBADF||slen>0) {
+						connection_close(i);
+					}
+			}
+		}
+	}
+	pthread_exit(0);
 }
 
