@@ -1,9 +1,10 @@
-CC?=gcc
-CFLAGS?=-O2 -Wall -Wextra
-output=bin/valeria
-source:=$(wildcard src/*.c)
 
-build: src/main.c
-    $(CC) $(source) -o $(output) $(FLAGS) 
+CC?=gcc
+CFlAGS?=-O2 -Wall -Wextra -D_GNU_SOURCE
+output=valeria
+source=$(wildcard src/*.c)
+
+build: $(source)
+	$(CC) $(source) -o $(output) $(CFLAGS)
 
 

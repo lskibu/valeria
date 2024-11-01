@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -33,109 +34,326 @@
 #include <sys/epoll.h>
 #include <getopt.h>
 #include <signal.h>
+#include <errno.h>
+
+#define MAX_OPEN (8192)
+
+#define TYPE_CLI (1)
+#define TYPE_TRGT (2)
+#define CHUNK_SZ (4096)
 
 extern char *optarg;
 extern int optind, opterr, optopt;
 
+/* connection info records
+ * connection[fd][0]=OPEN|CLOSE
+ * connection[fd][1]=TYPE{client, target}
+ * connection[fd][2]=STATE
+ * connection[fd][3]=TARGETFD
+ * connection[fd][4]={last receive time}
+*/
 
+static int connections[MAX_OPEN][5];
+static int open_connection_count=0;
+int serverfd=-1, epollfd=-1;
+static sig_atomic_t interrupt=0;
+
+int sock_send(int, unsigned char*, size_t);
+int sock_recv(int, unsigned char*, size_t);
+void connection_close(int);
+
+void init_connections();
+void cleanup();
 void usage();
 void version();
 void daemonize();
+void sigint_handle(int);
+void handle_event(struct epoll_event *);
 
 int main(int argc,char *argv[])
 {
-  struct option long_opts[] = {{"help", no_argument, NULL, 0},
-  {"version", no_argument, NULL, 0},
-  {"daemon", no_argument, NULL, 0},
-  {"debug", no_argument, NULL, 0},
-  {"port", required_argument, NULL, 0},
-  {"address", required_argument, NULL, 0}};
-  int opt;
-  int daemon = 0;
-  int debug  = 0;
-  while((opt=getopt_long(argc,argv, "hvDdp:a:", long_opts, &optind))!=-1) {
-    switch(opt) {
-      case 'h': 
-        usage(); 
-        exit(EXIT_SUCCESS);
-      case 'v':
-        version(); 
-        break;
-      case 'D':
-        daemon = 1;
-        break;
-      case 'd': 
-        debug = 1;
-        break;
-      case 'a': 
-        printf("address: %s\n", optarg); 
-        break;
-      case 'p': 
-        printf("port: %s\n", optarg); 
-        break;
-      default:
-        usage();
-        exit(EXIT_FAILURE);
-    }
-  }
-  if(daemon) daemonize();
-  return 0;
+	struct option long_opts[] = {{"help", no_argument, NULL, 0},
+	{"version", no_argument, NULL, 0},
+	{"daemon", no_argument, NULL, 0},
+	{"debug", no_argument, NULL, 0},
+	{"port", required_argument, NULL, 0},
+	{"address", required_argument, NULL, 0}};
+	int opt;
+	int daemon = 0;
+	int debug  = 0;
+	int long_optind=1;
+
+	struct sockaddr_in server_addr;
+	socklen_t addrlen;
+	struct sockaddr_in cli_addr;
+	int clifd;
+	char listen_addr[256]="127.0.0.1";
+	unsigned short port=1080;
+	struct epoll_event ev, events[128];
+	int max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : MAX_OPEN);
+	// decrement max open 
+	max_open--; // STDIN_FILENO
+	max_open--; // STDOUT_FILENO
+	max_open--; // STDERR_FILENO
+
+	while((opt=getopt_long(argc,argv, "hvDdp:a:", long_opts, &long_optind))!=-1) {
+		switch(opt) {
+			case 'h': 
+				usage(); 
+				exit(EXIT_SUCCESS);
+			case 'v':
+				version(); 
+				break;
+			case 'D':
+				daemon = 1;
+				break;
+			case 'd': 
+				debug = 1;
+				break;
+			case 'a': 
+				strncpy(listen_addr, optarg, strlen(optarg));
+				break;
+			case 'p': 
+				port = (unsigned short)atol(optarg);
+				break;
+			default:
+				usage();	
+				exit(EXIT_FAILURE);
+		}
+	}
+	if(daemon) daemonize();
+	if(signal(SIGINT, sigint_handle)==SIG_ERR) {
+		fprintf(stderr, "signal failed: %s\n", strerror(errno));
+		goto exit_failure;
+	}
+	// create IPv4 socket, TCP protocol
+	serverfd = socket(AF_INET, SOCK_STREAM, 0);
+	if(serverfd==-1) {
+		fprintf(stderr, "socket failed: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	max_open--; // socket fd
+	// set sock opttion reuseaddr
+	int optval=1;
+	setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof optval);
+
+	// register addr of socket
+	server_addr.sin_family=AF_INET;
+	server_addr.sin_addr.s_addr = inet_addr(listen_addr);
+	server_addr.sin_port=htons(port);
+	if(bind(serverfd, (struct sockaddr *)&server_addr, sizeof server_addr)==-1) {
+		fprintf(stderr, "bind failed: %s\n", strerror(errno));
+		goto exit_failure;
+	}
+	// listen for incoming connections
+	if(listen(serverfd, 10)==-1) {
+		fprintf(stderr, "listen failed: %s\n", strerror(errno));
+		goto exit_failure;
+	}
+	if(fcntl(serverfd, F_SETFD, O_NONBLOCK|fcntl(serverfd, F_GETFD, 0))==-1) {
+		fprintf(stderr, "fcntl failed: %s\n", strerror(errno));	
+		goto exit_failure;
+	}
+	
+	epollfd = epoll_create1(0);
+	if(epollfd==-1) {
+		fprintf(stderr, "epoll_create1 failed: %s\n", strerror(errno));
+		goto exit_failure;
+	}
+	max_open--; // epoll fd
+	ev.events=EPOLLIN;
+	ev.data.fd=serverfd;
+	if(epoll_ctl(epollfd, EPOLL_CTL_ADD, serverfd, &ev)==-1) {
+		fprintf(stderr, "epoll_ctl failed: %s\n", strerror(errno));
+		goto exit_failure;
+	}
+	// loop forever
+	for(;;) {
+		// wait until there is an up coming event
+		int nfds = epoll_wait(epollfd, &events, sizeof events/sizeof events[0], -1);
+		if(nfds==-1) {
+			fprintf(stderr, "epoll_wait failed: %s\n", strerror(errno));
+			goto exit_failure;
+		}
+		// handle events
+		for(int i=0;i < nfds; i++) {
+			// upcoming connection
+			if(events[i].data.fd==serverfd) {
+				if(open_connection_count >= max_open)
+					continue;
+				clifd = accept(serverfd, (struct sockaddr *)&cli_addr, &addrlen);
+				if(clifd==-1) {
+					fprintf(stderr, "accept failed: %s\n", strerror(errno));
+					goto exit_failure;
+				}
+				fprintf(stderr, "Client connected: %s:%d\n", inet_ntoa(cli_addr.sin_addr),
+														ntohs(cli_addr.sin_port));
+				if(fcntl(clifd, F_SETFD, O_NONBLOCK|fcntl(clifd, F_GETFD, 0))==-1) {
+					fprintf(stderr, "fcntl failed: %s\n", strerror(errno));
+					goto exit_failure;
+				}
+				open_connection_count++;
+				// set open flag
+				connections[clifd][0]=1;
+				connections[clifd][1]=TYPE_CLI;
+				connections[clifd][2]=0; // FLAG FOR INIT SOCKS5 negotiation
+				connections[clifd][3]=0; // fd of target host
+				connections[clifd][4]=time(NULL);
+
+				// register in epoll 
+				ev.events=EPOLLIN|EPOLLET;
+				ev.data.fd=clifd;
+				if(epoll_ctl(epollfd,EPOLL_CTL_ADD, clifd, &ev)==-1) {
+					fprintf(stderr, "epoll_ctl failed: %s\n", strerror(errno));
+					goto exit_failure;
+				}
+				// continue loop wait for read events
+			}
+			// handle event from client/host
+			else {
+				handle_event(&events[i]);
+			}
+		}
+	}
+	exit(EXIT_SUCCESS);
+exit_failure:
+	cleanup();
+	exit(EXIT_FAILURE);
 }
 
 void usage()
 {
-  fprintf(stderr, "Usage: ./valeria [OPTIONS]\n");
-  fprintf(stderr, "Options:\n");
-  fprintf(stderr, "\t-D,--daemon \t\tDaemonize the server (run in bg)\n");
-  fprintf(stderr, "\t-a,--address <addr>\tBind address.(default: localhost)\n");
-  fprintf(stderr, "\t-p,--port <port>   \tBind port. (default: 1080)\n");
-  fprintf(stderr, "\t-d,--debug  \t\tPrint debug messages (if -D no message is printed)\n");
-  fprintf(stderr, "\t-v,--version\t\tPrint program version then exit.\n");
-  fprintf(stderr, "\t-h,--help   \t\tPrint this help message then exit\n");
+	fprintf(stderr, "Usage: ./valeria [OPTIONS]\n");
+	fprintf(stderr, "Options:\n");
+	fprintf(stderr, "\t-D,--daemon \t\tDaemonize the server (run in bg)\n");
+	fprintf(stderr, "\t-a,--address <addr>\tBind address.(default: localhost)\n");
+	fprintf(stderr, "\t-p,--port <port>   \tBind port. (default: 1080)\n");
+	fprintf(stderr, "\t-d,--debug  \t\tPrint debug messages (if -D no message is printed)\n");
+	fprintf(stderr, "\t-v,--version\t\tPrint program version then exit.\n");
+	fprintf(stderr, "\t-h,--help   \t\tPrint this help message then exit\n");
 }
 
 void version()
 {
-  fprintf(stderr, "valeria v0.1 - socks5 server that runs on win32/linux\n");
-  fprintf(stderr, "Copyright (C) 2024 lskibu\n\n");
+	fprintf(stderr, "valeria v0.1 - socks5 server that runs on win32/linux\n");
+	fprintf(stderr, "Copyright (C) 2024 lskibu\n\n");
 }
 
 
 void daemonize()
 {
-  switch(fork()) {
-    case -1:
-      fprintf(stderr, "Could not create a child process\n");
-      exit(EXIT_FAILURE);
-    case 0: break;
-    default: _exit(EXIT_SUCCESS);
-  }
+	switch(fork()) {
+		case -1:
+			fprintf(stderr, "Could not create a child process\n");
+			exit(EXIT_FAILURE);
+		case 0: break;
+		default: _exit(EXIT_SUCCESS);
+	}
 
-  if(setsid()==-1)
-    _exit(EXIT_FAILURE);
+	if(setsid()==-1)
+		_exit(EXIT_FAILURE);
   
-  switch(fork()) {
-    case -1:
-      fprintf(stderr, "Could not create a child process\n");
-      exit(EXIT_FAILURE);
-    case 0: break;
-    default: _exit(EXIT_SUCCESS);
-  }
+	switch(fork()) {
+		case -1:
+			fprintf(stderr, "Could not create a child process\n");
+			exit(EXIT_FAILURE);
+		case 0: break;
+		default: _exit(EXIT_SUCCESS);
+	}
 
-  umask(0);
-  chdir("/");
-  int fd, maxfd = sysconf(_SC_OPEN_MAX);
-  maxfd = maxfd > 0 ? maxfd : 1024 * 8;
+	umask(0);
+	chdir("/");
+	int fd, maxfd = sysconf(_SC_OPEN_MAX);
+	maxfd = maxfd > 0 ? maxfd : 1024 * 8;
   
-  for(fd=0;fd < maxfd; fd++)
-    close(fd);
+	for(fd=0;fd < maxfd; fd++)
+		close(fd);
 
-  fd = open("/dev/null", O_RDWR);
-  if(fd!=STDIN_FILENO)
-    _exit(EXIT_FAILURE);
-  if(dup2(STDIN_FILENO, STDOUT_FILENO) != STDOUT_FILENO)
-    _exit(EXIT_FAILURE);
-  if(dup2(STDIN_FILENO, STDERR_FILENO) != STDERR_FILENO)
-    _exit(EXIT_FAILURE);
-
+	fd = open("/dev/null", O_RDWR);
+	if(fd!=STDIN_FILENO)
+		_exit(EXIT_FAILURE);
+	if(dup2(STDIN_FILENO, STDOUT_FILENO) != STDOUT_FILENO)
+		_exit(EXIT_FAILURE);
+	if(dup2(STDIN_FILENO, STDERR_FILENO) != STDERR_FILENO)
+		_exit(EXIT_FAILURE);
 } 
+
+void init_connections() 
+{
+	for(int i=0;i < MAX_OPEN; i++) {
+		memset(&connections[i], 0, sizeof connections[i]);
+	}
+}
+
+void cleanup() 
+{
+	if(serverfd!=-1) close(serverfd);
+	if(epollfd!=-1) close(epollfd);
+	for(int i=0;i < MAX_OPEN; i++) if(connections[i][0]) close(i);
+}
+
+int sock_send(int fd, unsigned char*buf, size_t len)
+{
+	int ret=0;
+	while(1) {
+		ret = write(fd, buf, len);
+		if(ret < 0 && errno==EAGAIN || errno==EWOULDBLOCK)
+			continue;
+		break;
+	}
+	return ret;
+}
+
+int sock_recv(int fd, unsigned char *buf, size_t len) 
+{
+	int ret=0;
+	while(1) {
+		ret = read(fd, buf, len);
+		if(ret<0 && errno==EAGAIN || errno==EWOULDBLOCK)
+			continue;
+		break;
+	}
+	return ret;
+}
+
+void sigint_handle(int sig)
+{
+	(void) sig;
+	interrupt=1; // useless flag xD
+}
+
+void handle_event(struct epoll_event *event)
+{
+	if(!connections[event->data.fd][0])
+		return; // not an open connection
+	// check for socket errors
+	int optval;
+	getsockopt(event->data.fd, SOL_SOCKET, SO_ERROR, &optval, sizeof optval);
+	if(optval > 0 && event->events&EPOLLERR || event->events&EPOLLRDHUP || event->events&EPOLLHUP) {
+		connection_close(event->data.fd);
+	}
+    // check wether socks5 cli or target host
+    // check wether read/write
+	char buf[256] = {0};
+	int len=0;
+	int total=0;
+	while((len=sock_recv(event->data.fd, buf, sizeof buf)) > 0) {
+		total += len;
+	}
+	if(len<0) {
+		fprintf(stderr, "sock_recv failed: %s\n", strerror(errno));
+		connection_close(event->data.fd);
+		return;
+	}
+	fprintf(stdout, "Received data len: %d bytes.\n", total);
+}
+
+void connection_close(int fd) {
+	connections[fd][0]=0;
+    connections[fd][1]=0;
+    connections[fd][2]=0;
+    connections[fd][3]=0;
+	connections[fd][4]=0;
+	close(fd);
+}
+
