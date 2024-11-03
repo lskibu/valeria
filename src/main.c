@@ -53,9 +53,10 @@ extern int optind, opterr, optopt;
  * connection[fd][2]=STATE
  * connection[fd][3]=TARGETFD
  * connection[fd][4]={last receive time}
+ * connection[fd][5]=FLAG: BUSY/READY
 */
 
-static int connections[MAX_OPEN][5];
+static int connections[MAX_OPEN][6];
 static int open_connection_count=0;
 static int max_open=0;
 static int server_timeout=20;
@@ -73,20 +74,20 @@ void version();
 void daemonize();
 void sigint_handle(int);
 void handle_event(struct epoll_event *);
-void timeout_proc(void *);
+void *timeout_proc(void *);
 
 int main(int argc,char *argv[])
 {
-	struct option long_opts[] = {{"help", no_argument, NULL, 0},
-	{"version", no_argument, NULL, 0},
-	{"daemon", no_argument, NULL, 0},
-	{"debug", no_argument, NULL, 0},
-	{"port", required_argument, NULL, 0},
-	{"address", required_argument, NULL, 0}};
+	struct option long_opts[] = {{"help", no_argument, NULL, 'h'},
+	{"version", no_argument, NULL, 'v'},
+	{"daemon", no_argument, NULL, 'D'},
+	{"debug", no_argument, NULL, 'd'},
+	{"port", required_argument, NULL, 'p'},
+	{"address", required_argument, NULL, 'a'}};
 	int opt;
 	int daemon = 0;
 	int debug  = 0;
-	int long_optind=1;
+	int long_optind=0;
 
 	struct sockaddr_in server_addr;
 	socklen_t addrlen;
@@ -108,6 +109,7 @@ int main(int argc,char *argv[])
 				exit(EXIT_SUCCESS);
 			case 'v':
 				version(); 
+				exit(EXIT_SUCCESS);
 				break;
 			case 'D':
 				daemon = 1;
@@ -139,13 +141,15 @@ int main(int argc,char *argv[])
 	}
 	max_open--; // socket fd
 	// set sock opttion reuseaddr
-	socklen_t optval=1;
-	if(setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof optval) < 0) {
+	socklen_t len=sizeof (int);
+	int optval = 1;
+	if(setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &optval, len) < 0) {
 		fprintf(stderr, "setsockopt failed: %s\n", strerror(errno));
 		goto exit_failure;
 	}
 
 	// register addr of socket
+	memset(&server_addr, 0, sizeof server_addr);	
 	server_addr.sin_family=AF_INET;
 	server_addr.sin_addr.s_addr = inet_addr(listen_addr);
 	server_addr.sin_port=htons(port);
@@ -154,7 +158,7 @@ int main(int argc,char *argv[])
 		goto exit_failure;
 	}
 	// listen for incoming connections
-	if(listen(serverfd, 10)==-1) {
+	if(listen(serverfd, 128)==-1) {
 		fprintf(stderr, "listen failed: %s\n", strerror(errno));
 		goto exit_failure;
 	}
@@ -184,7 +188,7 @@ int main(int argc,char *argv[])
 	for(;;) {
 		// wait until there is an up coming event
 		if(interrupt) break; // handle SIGINT
-		int nfds = epoll_wait(epollfd, &events, sizeof events/sizeof events[0], -1);
+		int nfds = epoll_wait(epollfd, events, sizeof events/sizeof events[0], -1);
 		if(nfds==-1) {
 			if(errno==EINTR)
 				continue;
@@ -197,17 +201,24 @@ int main(int argc,char *argv[])
 			if(events[i].data.fd==serverfd) {
 				if(open_connection_count >= max_open)
 					continue;
+				memset(&cli_addr, 0, sizeof cli_addr);
+				addrlen = sizeof cli_addr;
 				clifd = accept(serverfd, (struct sockaddr *)&cli_addr, &addrlen);
 				if(clifd==-1) {
 					fprintf(stderr, "accept failed: %s\n", strerror(errno));
 					goto exit_failure;
 				}
-				fprintf(stderr, "Client connected: %s:%d\n", inet_ntoa(cli_addr.sin_addr),
-														ntohs(cli_addr.sin_port));
-				if(fcntl(clifd, F_SETFD, O_NONBLOCK|fcntl(clifd, F_GETFD, 0))==-1) {
+				fprintf(stderr, "Client connected: %s:%d\n", 
+					inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+				if(fcntl(clifd, F_SETFD, fcntl(clifd, F_GETFD)|O_NONBLOCK)==-1) {
 					fprintf(stderr, "fcntl failed: %s\n", strerror(errno));
 					goto exit_failure;
 				}
+				int buflen = 65535;
+				if(setsockopt(clifd, SOL_SOCKET, SO_SNDBUF, &buflen, sizeof buflen) < 0) {
+					fprintf(stderr, "setsockopt failed: %s\n", strerror(errno));
+					goto exit_failure;
+				};
 				open_connection_count++;
 				// set open flag
 				connections[clifd][0]=1;
@@ -215,9 +226,10 @@ int main(int argc,char *argv[])
 				connections[clifd][2]=SOCKS5_STATE_RCVBUF; // FLAG FOR INIT SOCKS5 negotiation
 				connections[clifd][3]=0; // fd of target host
 				connections[clifd][4]=time(NULL);
+				connections[clifd][5]=0;
 
 				// register in epoll 
-				ev.events=EPOLLIN|EPOLLET;
+				ev.events=EPOLLIN|EPOLLOUT;
 				ev.data.fd=clifd;
 				if(epoll_ctl(epollfd,EPOLL_CTL_ADD, clifd, &ev)==-1) {
 					fprintf(stderr, "epoll_ctl failed: %s\n", strerror(errno));
@@ -279,7 +291,8 @@ void daemonize()
 	}
 
 	umask(0);
-	chdir("/");
+	if(chdir("/") < 0)
+		_exit(EXIT_FAILURE);
 	int fd, maxfd = sysconf(_SC_OPEN_MAX);
 	maxfd = maxfd > 0 ? maxfd : 1024 * 8;
   
@@ -313,7 +326,7 @@ int sock_send(int fd, unsigned char*buf, size_t len)
 	int ret=0;
 	while(1) {
 		ret = write(fd, buf, len);
-		if(ret < 0 && errno==EAGAIN || errno==EWOULDBLOCK)
+		if(ret < 0 && errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR)
 			continue;
 		break;
 	}
@@ -325,7 +338,7 @@ int sock_recv(int fd, unsigned char *buf, size_t len)
 	int ret=0;
 	while(1) {
 		ret = read(fd, buf, len);
-		if(ret<0 && errno==EAGAIN || errno==EWOULDBLOCK) 
+		if(ret<0 && errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR) 
 			continue;
 		break;
 	}
@@ -344,27 +357,45 @@ void handle_event(struct epoll_event *event)
 		return; // not an open connection
 	// check for socket errors
 	if( event->events&EPOLLERR || event->events&EPOLLRDHUP || event->events&EPOLLHUP) {
+		fprintf(stderr, "handle_event: epoll event reporeted error fd=%d\n", event->data.fd);
 		connection_close(event->data.fd);
+		return;
 	}
     // check wether socks5 cli or target host
     // check wether read/write
 	char buf[256] = {0};
-	int len=0;
-	int total=0;
-	if(connections[event->data.fd][2]==SOCKS5_STATE_RCVBUF) {
-		while((len=sock_recv(event->data.fd, buf, sizeof buf)) > 0) 
-			total += len;
+	int len;
+	if(connections[event->data.fd][2]==SOCKS5_STATE_RCVBUF && event->events&EPOLLIN) {
+		// set busy flag
+		__sync_lock_test_and_set(&connections[event->data.fd][5], 1);
+		len=sock_recv(event->data.fd, buf, sizeof buf) ;
 		if(len<0) {
 			fprintf(stderr, "sock_recv failed: %s\n", strerror(errno));
 			connection_close(event->data.fd);
 			return;
 		}
 
-		fprintf(stdout, "Received data len: %d bytes.\n", total);
+		fprintf(stdout, "Received data len: %d bytes.\n", len);
 		connections[event->data.fd][2]=SOCKS5_STATE_SNDBUF;
+		// rm busy flag
+		__sync_lock_test_and_set(&connections[event->data.fd][5], 0);
 	}
-	else if(connections[event->data.fd][2]==SOCKS5_STATE_SNDBUF) {
+	else if(connections[event->data.fd][2]==SOCKS5_STATE_SNDBUF&&event->events&EPOLLOUT) {
+		// set busy flag
+		__sync_lock_test_and_set(&connections[event->data.fd][5], 1);
 		strcpy(buf, "GOT YA!");
+		socklen_t len=sizeof(int);
+		int val=0;
+		if(getsockopt(event->data.fd, SOL_SOCKET, SO_ERROR, &val, &len) < 0) {
+			fprintf(stderr, "getsockopt failed: %s\n", strerror(errno));
+			connection_close(event->data.fd);
+			return;
+		}
+		if(val > 0)  { 
+			fprintf(stderr, "SO_ERROR flag is set...\n");
+			connection_close(event->data.fd);
+			return ;
+		}
 		len = sock_send(event->data.fd, buf, strlen(buf));
 		if(len < 0) {
 			fprintf(stderr, "sock_send failed: %s\n", strerror(errno));
@@ -373,6 +404,8 @@ void handle_event(struct epoll_event *event)
 		}
         fprintf(stdout, "Sent data len: %d bytes.\n", len);
         connections[event->data.fd][2]=SOCKS5_STATE_RCVBUF;
+		// rm busy flag
+		__sync_lock_test_and_set(&connections[event->data.fd][5], 0);
 	}
 }
 
@@ -382,11 +415,12 @@ void connection_close(int fd) {
     __sync_lock_test_and_set(&connections[fd][2], 0);
     __sync_lock_test_and_set(&connections[fd][3], 0);
 	__sync_lock_test_and_set(&connections[fd][4], 0);
+	__sync_lock_test_and_set(&connections[fd][5], 0);
 	close(fd);
 	__sync_fetch_and_sub(&open_connection_count, 1);
 }
 
-void timeout_proc(void *args) {
+void *timeout_proc(void *args) {
 	for(;;) {
 		if(interrupt) 
 			break;
@@ -394,11 +428,14 @@ void timeout_proc(void *args) {
 		for(int i=0;i < MAX_OPEN; i++) {
 			// currently just handle open fds
 			if(connections[i][0]) {
-				socklen_t slen=0;
-				if(getsockopt(i, SOL_SOCKET, SO_ERROR, &slen, sizeof slen) <  0)
-					if(errno=EBADF||slen>0) {
+				// check if busy
+				if(__sync_fetch_and_add(&connections[i][5], 0)) 
+					continue;
+				socklen_t slen=sizeof(int);
+				int opterr=0;
+				if(getsockopt(i, SOL_SOCKET, SO_ERROR, &opterr, &slen) <  0)
+					if(errno==EBADF||errno==EINVAL||opterr>0) 
 						connection_close(i);
-					}
 			}
 		}
 	}
