@@ -56,7 +56,7 @@ extern int optind, opterr, optopt;
  * connection[fd][5]=FLAG: BUSY/READY
 */
 
-static int connections[MAX_OPEN][6];
+static long int connections[MAX_OPEN][6];
 static int open_connection_count=0;
 static int max_open=0;
 static int server_timeout=20;
@@ -244,6 +244,7 @@ int main(int argc,char *argv[])
 		}
 	}
 	pthread_join(tid, NULL);
+	cleanup();
 	exit(EXIT_SUCCESS);
 exit_failure:
 	cleanup();
@@ -265,7 +266,7 @@ void usage()
 void version()
 {
 	fprintf(stderr, "valeria v0.1 - socks5 server that runs on win32/linux\n");
-	fprintf(stderr, "Copyright (C) 2024 lskibu\n\n");
+	fprintf(stderr, "Copyright (C) 2024 lskibu\n");
 }
 
 
@@ -372,11 +373,11 @@ void handle_event(struct epoll_event *event)
 		if(len<0) {
 			fprintf(stderr, "sock_recv failed: %s\n", strerror(errno));
 			connection_close(event->data.fd);
-			return;
+		} else {
+			fprintf(stdout, "Received data len: %d bytes.\n", len);
+			connections[event->data.fd][2]=SOCKS5_STATE_SNDBUF;
+			connections[event->data.fd][4]= time(NULL);
 		}
-
-		fprintf(stdout, "Received data len: %d bytes.\n", len);
-		connections[event->data.fd][2]=SOCKS5_STATE_SNDBUF;
 		// rm busy flag
 		__sync_lock_test_and_set(&connections[event->data.fd][5], 0);
 	}
@@ -384,7 +385,7 @@ void handle_event(struct epoll_event *event)
 		// set busy flag
 		__sync_lock_test_and_set(&connections[event->data.fd][5], 1);
 		strcpy(buf, "GOT YA!");
-		socklen_t len=sizeof(int);
+		/*socklen_t len=sizeof(int);
 		int val=0;
 		if(getsockopt(event->data.fd, SOL_SOCKET, SO_ERROR, &val, &len) < 0) {
 			fprintf(stderr, "getsockopt failed: %s\n", strerror(errno));
@@ -395,15 +396,15 @@ void handle_event(struct epoll_event *event)
 			fprintf(stderr, "SO_ERROR flag is set...\n");
 			connection_close(event->data.fd);
 			return ;
-		}
+		}*/
 		len = sock_send(event->data.fd, buf, strlen(buf));
 		if(len < 0) {
 			fprintf(stderr, "sock_send failed: %s\n", strerror(errno));
             connection_close(event->data.fd);
-            return;
+		} else {
+			fprintf(stdout, "Sent data len: %d bytes.\n", len);
+			connections[event->data.fd][2]=SOCKS5_STATE_RCVBUF;
 		}
-        fprintf(stdout, "Sent data len: %d bytes.\n", len);
-        connections[event->data.fd][2]=SOCKS5_STATE_RCVBUF;
 		// rm busy flag
 		__sync_lock_test_and_set(&connections[event->data.fd][5], 0);
 	}
@@ -431,11 +432,11 @@ void *timeout_proc(void *args) {
 				// check if busy
 				if(__sync_fetch_and_add(&connections[i][5], 0)) 
 					continue;
-				socklen_t slen=sizeof(int);
-				int opterr=0;
-				if(getsockopt(i, SOL_SOCKET, SO_ERROR, &opterr, &slen) <  0)
-					if(errno==EBADF||errno==EINVAL||opterr>0) 
-						connection_close(i);
+				if(time(NULL) - connections[i][4] >= server_timeout)
+				{
+					fprintf(stderr, "Closing connection...fd=%d\n", i);
+					connection_close(i);
+				}
 			}
 		}
 	}
