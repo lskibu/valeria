@@ -32,6 +32,7 @@ int main() {
 		perror("connect");
 		return -1;
 	}
+	fcntl(fd, F_SETFD, O_NONBLOCK|fcntl(fd, F_GETFD));
 	ev.events=EPOLLIN|EPOLLOUT;
 	ev.data.fd=fd;
 	epollfd = epoll_create1(0);
@@ -43,10 +44,7 @@ int main() {
 		perror("epoll_ctl");
 		return -1;
 	}
-	char buf[2];
-	if(write(fd, "hi", 2) < 0) perror("write");
-	if(read(fd, buf, 2) < 0) perror("read");
-	for(;;) {
+	for(int i=0; i<10 ; i++) {
 		int nfds=epoll_wait(epollfd, events, sizeof events/sizeof events[0], -1);
 		for(int i=0; i < nfds; i++) {
 			if(events[i].data.fd==fd) {
@@ -55,11 +53,11 @@ int main() {
 					int len;
 					int total=0;
 repeat_1:
-					while((len=read(fd, buf, sizeof buf)) == sizeof buf) {
+					while((len=recv(fd, buf, sizeof buf, MSG_DONTWAIT)) == sizeof buf) 
 						total+=len;
-					}
-					if(len < 0 && errno==EAGAIN || errno==EWOULDBLOCK)
+					if(len < 0 && errno==EAGAIN || errno==EWOULDBLOCK) 
 						goto repeat_1;
+					
 					printf("Received %d bytes\n", total);
 				}
 				else if(events[i].events&EPOLLOUT) {
@@ -76,5 +74,7 @@ repeat_2:
 			}
 		}
 	}
+	//close(fd);
+	close(epollfd);
 	return 0;
 }

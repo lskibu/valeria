@@ -229,7 +229,7 @@ int main(int argc,char *argv[])
 				connections[clifd][5]=0;
 
 				// register in epoll 
-				ev.events=EPOLLIN|EPOLLOUT;
+				ev.events=EPOLLIN;
 				ev.data.fd=clifd;
 				if(epoll_ctl(epollfd,EPOLL_CTL_ADD, clifd, &ev)==-1) {
 					fprintf(stderr, "epoll_ctl failed: %s\n", strerror(errno));
@@ -326,7 +326,7 @@ int sock_send(int fd, unsigned char*buf, size_t len)
 {
 	int ret=0;
 	while(1) {
-		ret = write(fd, buf, len);
+		ret = send(fd, buf, len, MSG_NOSIGNAL|MSG_DONTWAIT);
 		if(ret < 0 && errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR)
 			continue;
 		break;
@@ -338,7 +338,7 @@ int sock_recv(int fd, unsigned char *buf, size_t len)
 {
 	int ret=0;
 	while(1) {
-		ret = read(fd, buf, len);
+		ret = recv(fd, buf, len, MSG_NOSIGNAL|MSG_DONTWAIT);
 		if(ret<0 && errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR) 
 			continue;
 		break;
@@ -364,6 +364,19 @@ void handle_event(struct epoll_event *event)
 	}
     // check wether socks5 cli or target host
     // check wether read/write
+	socklen_t l = 0;
+	int val=0;
+	if(getsockopt(event->data.fd, SOL_SOCKET, SO_ERROR, &val, &l) < 0) {
+		fprintf(stderr, "getsockopt failed: %s\n", strerror(errno));
+        connection_close(event->data.fd);
+        return;
+    }
+    if(val > 0)  { 
+        fprintf(stderr, "SO_ERROR flag is set...\n");
+        connection_close(event->data.fd);
+        return ;
+    }
+
 	char buf[256] = {0};
 	int len;
 	if(connections[event->data.fd][2]==SOCKS5_STATE_RCVBUF && event->events&EPOLLIN) {
@@ -373,15 +386,24 @@ void handle_event(struct epoll_event *event)
 		if(len<0) {
 			fprintf(stderr, "sock_recv failed: %s\n", strerror(errno));
 			connection_close(event->data.fd);
-		} else {
-			fprintf(stdout, "Received data len: %d bytes.\n", len);
-			connections[event->data.fd][2]=SOCKS5_STATE_SNDBUF;
-			connections[event->data.fd][4]= time(NULL);
-		}
+			return;
+		} 
+		fprintf(stdout, "Received data len: %d bytes.\n", len);
+		connections[event->data.fd][2]=SOCKS5_STATE_SNDBUF;
+		connections[event->data.fd][4]= time(NULL);
+		len = sock_send(event->data.fd, buf, strlen(buf));
+        if(len < 0) {
+            fprintf(stderr, "sock_send failed: %s\n", strerror(errno));
+            connection_close(event->data.fd);
+            return;
+        }
+        fprintf(stdout, "Sent data len: %d bytes.\n", len);
+        connections[event->data.fd][2]=SOCKS5_STATE_RCVBUF;
 		// rm busy flag
 		__sync_lock_test_and_set(&connections[event->data.fd][5], 0);
+		return ;
 	}
-	else if(connections[event->data.fd][2]==SOCKS5_STATE_SNDBUF&&event->events&EPOLLOUT) {
+	/*else if(connections[event->data.fd][2]==SOCKS5_STATE_SNDBUF && event->events&EPOLLOUT) {
 		// set busy flag
 		__sync_lock_test_and_set(&connections[event->data.fd][5], 1);
 		strcpy(buf, "GOT YA!");
@@ -396,18 +418,18 @@ void handle_event(struct epoll_event *event)
 			fprintf(stderr, "SO_ERROR flag is set...\n");
 			connection_close(event->data.fd);
 			return ;
-		}*/
+		}
 		len = sock_send(event->data.fd, buf, strlen(buf));
 		if(len < 0) {
 			fprintf(stderr, "sock_send failed: %s\n", strerror(errno));
             connection_close(event->data.fd);
-		} else {
-			fprintf(stdout, "Sent data len: %d bytes.\n", len);
-			connections[event->data.fd][2]=SOCKS5_STATE_RCVBUF;
-		}
+			return;
+		} 
+		fprintf(stdout, "Sent data len: %d bytes.\n", len);
+		connections[event->data.fd][2]=SOCKS5_STATE_RCVBUF;
 		// rm busy flag
 		__sync_lock_test_and_set(&connections[event->data.fd][5], 0);
-	}
+	}*/
 }
 
 void connection_close(int fd) {
