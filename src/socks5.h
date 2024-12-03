@@ -21,19 +21,13 @@
 #ifndef SOCKS5_H
 #define SOCKS5_H
 
-
-#define SOCKS5_STATE_INIT (0)
-#define SOCKS5_STATE_SETM (1)
-#define SOCKS5_STATE_AUTH (2)
-#define SOCKS5_STATE_EXCH (3)
-#define SOCKS5_STATE_SNDBUF (4)
-#define SOCKS5_STATE_RCVBUF (5)
+#include "connection.h"
 
 #define SOCKS5_VERSION  (5)
 
 #define METHOD_NO_AUTH  (0)
 #define METHOD_USER_PASS  (2)
 
-
+void handle_clien(struct connection *);
 
 #endif 
