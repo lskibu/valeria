@@ -23,19 +23,30 @@
 #define CONNECTION_H
 
 #include <time.h>
+#include "server.h"
+
+#define DEFAULT_MAX_OPEN	(8192)
+
+enum connection_type {
+	CLIENT,
+	TARGET };
 
 struct connection {
+	struct server *srv;
 	int fd;
 	int tfd;
 	unsigned char open;
-	enum {
-		CLIENT,
-		TARGET } type;
+	int state;
+	int type;
 	time_t recv_time;
 	int lock;
 };
 
-struct connection *connection_new();
+struct connection *connection_new(int);
+int connection_open(struct connection *, int type);
+void connection_lock(struct connection *);
+void connection_unlock(struct connection *);
+int connection_is_locked(struct connection *);
 int connection_close(struct connection *);
 int connection_destroy(struct connection **);
 

@@ -22,19 +22,24 @@
 #ifndef SERVER_H
 #define SERVER_H
 
+#include <netinet/in.h>
 #include "connection.h"
 
 struct server {
 	int fd;
-	int epoll_fd;
-	size_t connection_open_count;
-	size_t connection_open_max;
+	int epollfd;
+	in_addr_t ip;
+	in_port_t port;
+	size_t open_count;
+	size_t open_max;
 	struct connection *connections;
 };
 
 struct server* server_create(size_t );
+int server_init(struct server *, char *,unsigned short );
 int server_socket_bind(struct server *);
 int server_listen(struct server *);
+int server_start(struct server *);
 void server_destroy(struct server **);
 
 

@@ -19,8 +19,6 @@
 
 
 
-#ifndef UTIL_H
-#define UTIL_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,27 +30,48 @@
 #include <netinet/in.h>
 #include <errno.h>
 
-#define SYNC_LOCK(ptr) __sync_lock_test_and_set((ptr),1)
-#define SYNC_UNLOCK(ptr) __sync_lock_test_and_set((ptr),0)
-#define SYNC_IS_LOCKED(ptr) ATOMIC_GET((ptr))
 
-#define ATOMIC_ADD(ptr,i) __sync_fetch_and_add((ptr),i)
-#define ATOMIC_SUB(ptr,i) __sync_fetch_and_sub((ptr),i)
-#define ATOMIC_INC(ptr) ATOMIC_ADD((ptr),1)
-#define ATOMIC_DEC(ptr) ATOMIC_SUB((ptr),1)
-#define ATOMIC_GET(ptr) ATOMIC_ADD((ptr),0)
+int socket_connect(char *ip, unsigned short port)
+{
+	struct sockaddr_in addr;
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if(fd < 0)
+		return -1;
 
-#define DEBUG(msg, ...)	{\
-	if(debug) { \
-		if(errno) { \
-			fprintf(stderr, "%s:%s:%d - "msg": fatal error: %s\n", __func__, __FILE__, __LINE__, ##__VA_ARGS__, strerror(errno)); \
-		} \
-		else \
-			fprintf(stderr, msg, ##__VA_ARGS__); \
-		fputc('\n', stderr); }}
+	memset(&addr, 0, sizeof addr);
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = inet_addr(ip);
+	addr.sin_port = htons(port);
+	if(connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0)
+		return -1;
+	return fd;
+}
 
-int socket_connect(char *ip, unsigned short port);
-int send_buf(int fd, char *buf, size_t len);
-int recv_buf(int fd, char *buf, size_t len);
+int send_buf(int fd, char *buf, size_t len)
+{
+	int n;
+send_again:
+    n = send(fd, buf, len, MSG_DONTWAIT);
+    if(n < 0) {
+        if(errno==EAGAIN || errno==EWOULDBLOCK)
+            goto send_again;
+        else
+            return -1;
+    }
+	return n;
+}
 
-#endif
+int recv_buf(int fd, char *buf, size_t len)
+{
+	int n;
+recv_again:
+    n = recv(fd, buf, len, MSG_DONTWAIT);
+    if(n < 0) {
+        if(errno==EAGAIN || errno==EWOULDBLOCK)
+            goto recv_again;
+        else
+            return -1;
+    }
+	return n;
+}
+
