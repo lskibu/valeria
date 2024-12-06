@@ -71,14 +71,16 @@ int socks5_auth_check(struct connection *conn)
 
 void handle_client(struct connection *conn, unsigned int flags)
 {
-	if(!conn->open)
+	if(!conn->open) {
+		DEBUG("Oops! not open");
         return; 
+	}
     if(flags&EPOLLERR || flags&EPOLLRDHUP || flags&EPOLLHUP) {
         DEBUG("handle_client: epoll event reporeted an error\n");
         connection_close(conn);
         return;
     }
-
+	connection_lock(conn);
 	if(conn->type==CLIENT) {
 		switch(conn->state) {
 			case S5_IDENT:
@@ -103,6 +105,7 @@ void handle_client(struct connection *conn, unsigned int flags)
 	} else {
 		
 	}
+	connection_unlock(conn);
 }
 
 int recv_initial_msg(struct connection *conn)

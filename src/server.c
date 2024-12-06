@@ -84,14 +84,17 @@ int server_start(struct server *srv)
 	struct sockaddr_in addr;
 	int fd;
 	socklen_t len;
+	
 	for(;;) {
 		if(interrupt_flag)
 			break;
+		
 		int nfds = epoll_wait(srv->epollfd, events, sizeof events/ sizeof events[0], 3000);
+
 		if(nfds < 0 && errno!=EINTR)
 			return -1;
 
-		for(int i=0;i <= nfds; i++) {
+		for(int i=0;i < nfds; i++) {
 			if(events[i].data.fd==srv->fd) {
 				if(ATOMIC_GET(&srv->open_count) >= srv->open_max)
 					continue;
@@ -100,15 +103,14 @@ int server_start(struct server *srv)
 				if(fd < 0)
 					return -1;
 				DEBUG("%s:%d connected", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
-				//ATOMIC_INC(&srv->open_count);
 				connection_open(&srv->connections[fd], CLIENT);
 				srv->connections[fd].state = S5_IDENT;
-				event.events = EPOLLIN;
+				event.events = EPOLLIN|EPOLLET;
 				event.data.fd = fd;
 				if(epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, fd, &event) < 0)
 					return -1;
 			}
-			else
+			else 
 				handle_client(&srv->connections[events[i].data.fd], events[i].events);
 		}
 	}

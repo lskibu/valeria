@@ -49,12 +49,15 @@ extern int optind, opterr, optopt;
 
 int interrupt_flag=0;
 int debug=0;
+int timeout = 20;
+time_t uptime;
 
 void usage();
 void version();
 void daemonize();
 void sigint_handle(int);
 void *timeout_proc(void *);
+void *stats_thread(void *);
 
 int main(int argc,char *argv[])
 {
@@ -71,7 +74,7 @@ int main(int argc,char *argv[])
 	struct server *srv;
 	char listen_addr[256]="127.0.0.1";
 	unsigned short port=1080;
-	pthread_t tid;
+	pthread_t tid, stid;
 
 	int max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : DEFAULT_MAX_OPEN);
 
@@ -103,29 +106,40 @@ int main(int argc,char *argv[])
 	}
 	if(daemon) 
 		daemonize();
+
 	if(signal(SIGINT, sigint_handle)==SIG_ERR) 
 		DEBUG("signal() failed");
 
-	//if(pthread_create(&tid, NULL, timeout_proc, NULL) < 0) 
-	//	DEBUG("pthread_create failed");
 	if((srv = server_create(max_open))==NULL) {
 		DEBUG("server_create failed");
 		return -1;
 	};
 	
-
 	if(server_init(srv, listen_addr, port) < 0) 
 		DIE("server_init failed", server_destroy, &srv);
+
+	for(int i=0;i < 5; i++)
+        connection_open(&srv->connections[i], -1);
 
 	if(server_socket_bind(srv) < 0)
 		DIE("server_socket_bind failed", server_destroy, &srv);
 
 	if(server_listen(srv) < 0)
 		DIE("server_listen failed", server_destroy, &srv);
-	
+
+	uptime = time(NULL);
+
+	if(pthread_create(&tid, NULL, timeout_proc, (void *) srv) < 0)
+        DIE("failed to create timeout thread", server_destroy, &srv);
+
+    if(pthread_create(&stid, NULL, stats_thread, (void *) srv) < 0)
+        DIE("failed to create stats thread", server_destroy, &srv)
+
 	if(server_start(srv) < 0)
 		DIE("server_start failed", server_destroy, &srv);
 
+	pthread_join(tid, NULL);
+	pthread_join(stid, NULL);
 	return 0;
 }
 
@@ -195,23 +209,39 @@ void sigint_handle(int sig)
 }
 
 void *timeout_proc(void *args) {
+	struct server *srv = (struct server *) args;
 	for(;;) {
 		if(ATOMIC_GET(&interrupt_flag)) 
 			break;
 
-		for(int i=0;i < DEFAULT_MAX_OPEN; i++) {
-			// currently just handle open fds
-			//if(connections[i][0]) {
-				// check if busy
-			//	if(time(NULL) - connections[i][4] >= server_timeout)
-			//	{
-			//		fprintf(stderr, "Closing connection...fd=%d\n", i);
-			//		connection_close(i);
-			//	}
-			//}
+		for(int i=5;i < srv->open_max; i++) {
+			if(srv->connections[i].open) {
+				if(connection_is_locked(&srv->connections[i]))
+					continue;
+
+				if(time(NULL) - srv->connections[i].recv_time >= (long) timeout ) {
+					DEBUG("Timeout on fd: %d", srv->connections[i].fd);	
+					connection_close(&srv->connections[i]);
+				}
+			}
 		}
 		sleep(1);
 	}
 	pthread_exit(0);
+}
+
+void *stats_thread(void *args) {
+    struct server *srv = (struct server *) args;
+	for(;;) {
+        if(ATOMIC_GET(&interrupt_flag))
+            break;
+		
+		if(!debug)
+			fprintf(stderr, "UPTIME: %ld secs | OPEN CONNECTIONS: %ld\r",
+				time(NULL) - uptime, ATOMIC_GET(&srv->open_count) - 5);
+		
+        sleep(1);
+    }
+    pthread_exit(0);
 }
 
