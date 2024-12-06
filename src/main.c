@@ -219,6 +219,14 @@ void *timeout_proc(void *args) {
 				if(connection_is_locked(&srv->connections[i]))
 					continue;
 
+				/*int val=0;
+				socklen_t len=0;
+				getsockopt(srv->connections[i].fd, SOL_SOCKET, SO_ERROR, &val, &len);
+				if(val) {
+					DEBUG("socket error... closing fd: %d", srv->connections[i].fd);
+					connection_close(&srv->connections[i]);
+				}*/
+
 				if(time(NULL) - srv->connections[i].recv_time >= (long) timeout ) {
 					DEBUG("Timeout on fd: %d", srv->connections[i].fd);	
 					connection_close(&srv->connections[i]);

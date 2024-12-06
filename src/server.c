@@ -105,7 +105,7 @@ int server_start(struct server *srv)
 				DEBUG("%s:%d connected", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
 				connection_open(&srv->connections[fd], CLIENT);
 				srv->connections[fd].state = S5_IDENT;
-				event.events = EPOLLIN|EPOLLET;
+				event.events = EPOLLIN;
 				event.data.fd = fd;
 				if(epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, fd, &event) < 0)
 					return -1;
