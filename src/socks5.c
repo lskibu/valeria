@@ -108,7 +108,8 @@ void handle_client(struct connection *conn, unsigned int flags)
 				/* close */
 		}
 	} else {
-		
+		if(proxy_data(conn) < 0)
+            DEBUG("proxy_data failed");
 	}
 	connection_unlock(conn);
 }
@@ -256,7 +257,7 @@ int process_request(struct connection *conn)
 	ev.events = EPOLLIN;
 	ev.data.fd = fd;
 
-	if(epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, fd, &ev) < 0)
+	if(epoll_ctl(conn->srv->epollfd, EPOLL_CTL_ADD, fd, &ev) < 0)
 		return -1;
 	
 	conn->state = S5_CONNECT;
@@ -281,7 +282,7 @@ int proxy_data(struct connection *conn)
 			connection_close(conn);
 			return -1;
 		}
-		len = send(conn->dst_fd, buffer, len, MSG_DONDWAIT);
+		len = send(conn->dst_fd, buffer, len, MSG_DONTWAIT);
 		if(len < 0) {
             DEBUG("proxy_data failed while send()");
             connection_close(conn);
