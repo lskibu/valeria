@@ -158,7 +158,7 @@ int process_request(struct connection *conn)
 	struct epoll_event ev;
 	struct socks5_request_msg msg;
 	unsigned int len, reply;
-	int addr_type = 0;
+	int addr_type = AF_INET;
 	in_addr_t dst_addr = INADDR_ANY;
 	in_port_t dst_port = 0;
 	struct in6_addr dst_addr6 = IN6ADDR_ANY_INIT;
@@ -269,7 +269,7 @@ int proxy_data(struct connection *conn)
 {
 	unsigned char buffer[4096];
 	int len = sizeof buffer;
-	if(conn->type != TARGET || conn->state != S5_CONNECT) {
+	if(conn->type != TARGET && conn->state != S5_CONNECT) {
 		DEBUG("Oops! proxy_data got invalid client");
 		connection_close(conn);
 		return 0;
