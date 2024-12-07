@@ -34,7 +34,6 @@ enum socks5_state {
 	S5_IDENT,
 	S5_AUTH,
 	S5_REQST,
-	S5_REPLY,
 	S5_CONNECT,
 	S5_UDPASS
 };	
@@ -62,6 +61,12 @@ enum socks5_addr_type {
 	ATYP_IPV4 = 0,  //o  IP V4 address: X'01'
     ATYP_NAME = 3,  //o  DOMAINNAME: X'03'
     ATYP_IPV6 = 4  //o  IP V6 address: X'04'
+};
+
+enum socks5_command {
+	CMD_CONNECT=1,
+    CMD_BIND=2,
+    CMD_UDP_ASSOCIATE=3
 };
 
 struct socks5_version_identifier_msg {
@@ -117,15 +122,9 @@ struct socks5_status_msg {
 }__attribute__((__packed__));
 
 int socks5_auth_check(struct connection *);
-
 void handle_client(struct connection *, unsigned int);
-
 int recv_initial_msg(struct connection *);
-
 int process_request(struct connection *);
-
-int send_reply(struct connection *);
-
-int start_proxy(struct connection *);
+int proxy_data(struct connection *);
 
 #endif 

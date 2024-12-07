@@ -46,6 +46,7 @@
 	if(debug) { \
 		if(errno) { \
 			fprintf(stderr, "%s:%s:%d - "msg": fatal error: %s\n", __func__, __FILE__, __LINE__, ##__VA_ARGS__, strerror(errno)); \
+			errno=0;\
 		} \
 		else \
 			fprintf(stderr, msg, ##__VA_ARGS__); \

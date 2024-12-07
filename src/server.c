@@ -43,7 +43,7 @@ int server_socket_bind(struct server *srv)
 {
 	struct sockaddr_in addr;
 	int val = 1;
-	srv->fd = socket(AF_INET, SOCK_STREAM, 0);
+	srv->fd = socket(AF_INET, SOCK_STREAM|SOCK_NONBLOCK, 0);
 	if(srv->fd < 0) 
 		return -1;
 	DEBUG("created server socket");

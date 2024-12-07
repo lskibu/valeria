@@ -17,10 +17,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
+#include <netdb.h>
 #include <errno.h>
 
 #include "util.h"
@@ -29,6 +31,7 @@
 #include "socks5.h"
 
 extern int debug;
+
 
 int socks5_auth_check(struct connection *conn) 
 {
@@ -92,10 +95,12 @@ void handle_client(struct connection *conn, unsigned int flags)
 					DEBUG("socks5_auth_check failed");
 				break;
 			case S5_REQST:
-				break;
-			case S5_REPLY:
+				if(process_request(conn) < 0)
+					DEBUG("process_request failed");
 				break;
 			case S5_CONNECT:
+				if(proxy_data(conn) < 0)
+					DEBUG("proxy_data failed");
 				break;
 			case S5_UDPASS:
 				break;
@@ -149,15 +154,139 @@ int recv_initial_msg(struct connection *conn)
 
 int process_request(struct connection *conn) 
 {
+	struct epoll_event ev;
 	struct socks5_request_msg msg;
-	int len;
+	unsigned int len, reply;
+	int addr_type = 0;
+	in_addr_t dst_addr = INADDR_ANY;
+	in_port_t dst_port = 0;
+	struct in6_addr dst_addr6 = IN6ADDR_ANY_INIT;
+	struct hostent *dnsinfo = NULL;
+	char hostname[256]={0};
+	int fd;
 
+#define REPLY_ERROR(flag) do {\
+		msg1.reply = flag;\
+        len = send(conn->fd, &msg1, sizeof msg1, MSG_DONTWAIT); \
+        if(len < 0) \
+            return -1; \
+        DEBUG("Terminating the connection"); \
+        connection_close(conn); \
+        return 0; \
+    } while(0) ;
+
+
+	struct socks5_reply_msg msg1;
+	
+	DEBUG("Processing request...");
+
+	memset(&msg1, 0, sizeof msg1);
 	memset(&msg, 0, sizeof msg);
 	
 	len = recv(conn->fd, &msg, sizeof msg, MSG_DONTWAIT);
+	
 	if(len < 0)
 		return -1;
 
+	DEBUG("REQUEST: ver: %d, CMD: %d, ATYP: %d", msg.version,
+		msg.command, msg.addr_type);
+
+	msg1.version = SOCKS5_VERSION;
+	msg1.addr_type = 1;
+	msg1.bind_addr = conn->srv->ip;
+	msg1.bind_port = conn->srv->port;
+
+	if(msg.command != CMD_CONNECT) 
+		REPLY_ERROR(REPLY_CMDNSPR);
+
+	switch(msg.addr_type) {
+		case ATYP_IPV4:
+			addr_type = AF_INET;
+			dst_addr = ((struct socks5_request_in_msg *)&msg)->ipv4_addr;
+			dst_port = ((struct socks5_request_in_msg *)&msg)->port;
+			break;
+		case ATYP_NAME: 
+			len = (unsigned int) msg.buffer[0];
+			if(len < 256) {
+				strncpy(hostname, &msg.buffer[1], len);
+				dnsinfo = gethostbyname(hostname);
+				if(dnsinfo!=NULL && dnsinfo->h_length > 0) {
+					DEBUG("hostent: name: %s, type: %d, length: %d\n",
+                dnsinfo->h_name, dnsinfo->h_addrtype, dnsinfo->h_length);
+					addr_type = dnsinfo->h_addrtype;
+					dst_addr = inet_addr(dnsinfo->h_addr_list[0]);
+				} else
+					REPLY_ERROR(REPLY_HSTNRCH);
+				dst_port = *((in_port_t *) &msg.buffer[len+1]);
+			}
+			break;
+		case ATYP_IPV6: 
+			addr_type = AF_INET6;
+			dst_addr6 = ((struct socks5_request_in6_msg *) &msg)->ipv6_addr;
+			dst_port = ((struct socks5_request_in6_msg *) &msg)->port;
+			break;
+		default: break;
+	}
+	DEBUG("Request processed! addr type: %d", addr_type);
+
+	// try to connect to dst
+	fd = socket(addr_type, SOCK_STREAM|SOCK_NONBLOCK, 0);
+
+	if(fd < 0) 
+		switch (errno) {
+			case ENETUNREACH: REPLY_ERROR(REPLY_NETNRCH);
+			case EHOSTDOWN: REPLY_ERROR(REPLY_HSTNRCH);
+			case ECONNREFUSED: REPLY_ERROR(REPLY_REFUSED);
+			default: REPLY_ERROR(REPLY_REFUSED);
+		}
+
+	DEBUG("SUCCESSFULLY CONNEECTED TO DST ADDR");
+
+	connection_open(&conn->srv->connections[fd], TARGET);
+	
+	msg1.reply = REPLY_SUCCESS;
+
+    len = send(conn->fd, &msg1, sizeof msg1, MSG_DONTWAIT); 
+    if(len < 0) 
+        return -1;
+	
+	conn->dst_fd = fd;
+	conn->srv->connections[fd].dst_fd = conn->fd;
+
+	ev.events = EPOLLIN;
+	ev.data.fd = fd;
+
+	if(epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, fd, &ev) < 0)
+		return -1;
+	
+	conn->state = S5_CONNECT;
+#undef REPLY_ERROR
 	return 0;
+}
+
+int proxy_data(struct connection *conn)
+{
+	unsigned char buffer[4096];
+	int len = sizeof buffer;
+	if(conn->type != TARGET || conn->state != S5_CONNECT) {
+		DEBUG("Oops! proxy_data got invalid client");
+		connection_close(conn);
+		return 0;
+	}
+	while(len==sizeof buffer) {
+		memset(buffer, 0, sizeof buffer);
+		len = recv(conn->fd, buffer, sizeof buffer, MSG_DONTWAIT);
+		if(len < 0) {
+			DEBUG("proxy_data failed while recv()");
+			connection_close(conn);
+			return -1;
+		}
+		len = send(conn->dst_fd, buffer, len, MSG_DONDWAIT);
+		if(len < 0) {
+            DEBUG("proxy_data failed while send()");
+            connection_close(conn);
+            return -1;
+        }
+	}
 }
 

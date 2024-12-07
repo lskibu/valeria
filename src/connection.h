@@ -34,7 +34,7 @@ enum connection_type {
 struct connection {
 	struct server *srv;
 	int fd;
-	int tfd;
+	int dst_fd;
 	unsigned char open;
 	int state;
 	int type;
