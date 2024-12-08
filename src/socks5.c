@@ -159,12 +159,14 @@ int recv_initial_msg(struct connection *conn)
 int process_request(struct connection *conn) 
 {
 	struct epoll_event ev;
+	struct sockaddr_in target_addr;
+	struct sockaddr_in6 target_addr6;
 	struct socks5_request_msg msg;
 	unsigned int len, reply;
 	int addr_type = AF_INET;
 	in_addr_t dst_addr = INADDR_ANY;
 	in_port_t dst_port = 0;
-	struct in6_addr dst_addr6 = IN6ADDR_ANY_INIT;
+	struct in6_addr dst_addr6 = in6addr_any;
 	struct hostent *dnsinfo = NULL;
 	char hostname[256]={0};
 	int fd;
@@ -217,10 +219,10 @@ int process_request(struct connection *conn)
 				strncpy(hostname, &msg.buffer[1], len);
 				dnsinfo = gethostbyname(hostname);
 				if(dnsinfo!=NULL && dnsinfo->h_length > 0) {
-					DEBUG("hostent: name: %s, type: %d, length: %d\n",
-                dnsinfo->h_name, dnsinfo->h_addrtype, dnsinfo->h_length);
+					DEBUG("hostent: name: %s, type: %d, length: %d, ip_addr = %s\n",
+                dnsinfo->h_name, dnsinfo->h_addrtype, dnsinfo->h_length, inet_ntoa(*(struct in_addr *) dnsinfo->h_addr));
 					addr_type = dnsinfo->h_addrtype;
-					dst_addr = inet_addr(dnsinfo->h_addr_list[0]);
+					dst_addr = ((struct in_addr *) dnsinfo->h_addr)->s_addr;
 				} else
 					REPLY_ERROR(REPLY_HSTNRCH);
 				dst_port = *((in_port_t *) &msg.buffer[len+1]);
@@ -236,15 +238,43 @@ int process_request(struct connection *conn)
 	DEBUG("Request processed! addr type: %d", addr_type);
 
 	// try to connect to dst
-	fd = socket(addr_type, SOCK_STREAM|SOCK_NONBLOCK, 0);
+	fd = socket(addr_type, SOCK_STREAM, 0);
 
 	if(fd < 0) 
+		REPLY_ERROR(REPLY_FAILURE);
+	
+	memset(&target_addr, 0, sizeof target_addr);
+	memset(&target_addr6 , 0, sizeof target_addr6);
+
+	if(addr_type==AF_INET) {
+		target_addr.sin_family = AF_INET;
+		target_addr.sin_addr.s_addr = dst_addr;
+		target_addr.sin_port = dst_port;
+		
+		DEBUG("Connecting to ipv4 address: %s:%d", inet_ntoa(target_addr.sin_addr), ntohs(dst_port));
+		
+		len = connect(fd, (struct sockaddr *) &target_addr, sizeof target_addr);
+	} else {
+		memset(hostname, 0, sizeof hostname);
+		inet_ntop(AF_INET6, &dst_addr6, hostname, sizeof hostname);
+		
+		target_addr6.sin6_family = AF_INET6;
+		target_addr6.sin6_addr = dst_addr6;
+		target_addr6.sin6_port = dst_port;
+	
+		DEBUG("Connecting to ipv6 address: %s:%d", hostname, ntohs(dst_port));
+
+		len = connect(fd, (struct sockaddr *) &target_addr6, sizeof target_addr6);
+	}
+	if(len < 0) {
+		DEBUG("Connection failed");
 		switch (errno) {
 			case ENETUNREACH: REPLY_ERROR(REPLY_NETNRCH);
 			case EHOSTDOWN: REPLY_ERROR(REPLY_HSTNRCH);
 			case ECONNREFUSED: REPLY_ERROR(REPLY_REFUSED);
 			default: REPLY_ERROR(REPLY_REFUSED);
 		}
+	}
 
 	DEBUG("SUCCESSFULLY CONNEECTED TO DST ADDR");
 
