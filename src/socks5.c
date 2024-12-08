@@ -44,10 +44,13 @@ int socks5_auth_check(struct connection *conn)
 	
 	memset(buf, 0, sizeof buf);
 	
-	len = recv_buf(conn->fd, buf, sizeof buf);
+	len = recv (conn->fd, buf, sizeof buf, MSG_DONTWAIT);
+
 	if(len < 0)
 		return -1;
+	
 	conn->recv_time = time(NULL);
+	
 	ulen = (int) buf[1];
 	strncpy(uname, buf+2, ulen);
 	plen = (int) buf[2+ulen];
@@ -188,6 +191,8 @@ int process_request(struct connection *conn)
 	
 	if(len < 0)
 		return -1;
+	
+	conn->recv_time = time(NULL);
 
 	DEBUG("REQUEST: ver: %d, CMD: %d, ATYP: %d", msg.version,
 		msg.command, msg.addr_type);
@@ -282,6 +287,9 @@ int proxy_data(struct connection *conn)
 			connection_close(conn);
 			return -1;
 		}
+
+		conn->recv_time = time(NULL);
+
 		len = send(conn->dst_fd, buffer, len, MSG_DONTWAIT);
 		if(len < 0) {
             DEBUG("proxy_data failed while send()");
