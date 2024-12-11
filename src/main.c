@@ -105,13 +105,15 @@ int main(int argc,char *argv[])
 	if(daemon) 
 		daemonize();
 
-    rlim.rlim_cur = RLIM_INFINITY;
-    rlim.rlim_max = RLIM_INFINITY;
-    //if(getuid() == 0) {
-    //    DEBUG("Running as root");
-        if(setrlimit(RLIMIT_NOFILE, &rlim) < 0);
-            DEBUG("setrlimit() failed");
-    //} else DEBUG("not root!");
+    if(getrlimit(RLIMIT_NOFILE, &rlim) < 0) {
+        DEBUG("getrlimit() failed");
+		return -1;
+	}
+	rlim.rlim_cur = rlim.rlim_max;
+	if(setrlimit(RLIMIT_NOFILE, &rlim) < 0) {
+		DEBUG("setrlimit() failed");
+		return -1;
+	}
 
 	max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : DEFAULT_MAX_OPEN);
     DEBUG("max_open=%d", max_open);
