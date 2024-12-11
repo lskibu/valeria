@@ -1,3 +1,25 @@
+/**
+ * valeria - A socks5 server that runs on linux/Win32
+ *
+ * Copyright (C) 2024 lskibu
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *  
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +29,7 @@
 #include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <errno.h>
 
 #include "util.h"
@@ -14,8 +37,10 @@
 #include "connection.h"
 #include "socks5.h"
 
-extern int interrupt_flag;
+extern sig_atomic_t interrupt_flag;
 extern int debug;
+extern int timeout;
+extern int uptime;
 
 struct server* server_create(size_t max_open)
 {
@@ -52,7 +77,7 @@ int server_socket_bind(struct server *srv)
 	addr.sin_addr.s_addr = srv->ip;
 	addr.sin_port = srv->port;
 	
-	if(setsockopt(srv->fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof val) < 0)
+	if(setsockopt(srv->fd, SOL_SOCKET, SO_REUSEADDR|SO_REUSEPORT, &val, sizeof val) < 0)
 		return -1;
 		
 	if(bind(srv->fd, (struct sockaddr *)&addr, sizeof addr) < 0)
@@ -86,32 +111,66 @@ int server_start(struct server *srv)
 	socklen_t len;
 	
 	for(;;) {
-		if(interrupt_flag)
+		if(interrupt_flag) {
+			DEBUG("received Ctrl+c");
 			break;
+		}
 		
-		int nfds = epoll_wait(srv->epollfd, events, sizeof events/ sizeof events[0], 3000);
+		int nfds = epoll_wait(srv->epollfd, events, sizeof events/ sizeof events[0], 1000);
 
 		if(nfds < 0 && errno!=EINTR)
 			return -1;
 
 		for(int i=0;i < nfds; i++) {
+			
 			if(events[i].data.fd==srv->fd) {
-				if(ATOMIC_GET(&srv->open_count) >= srv->open_max)
+				
+				if(srv->open_count >= srv->open_max)
 					continue;
+				
 				memset(&addr, 0, sizeof addr);
 				fd = accept(srv->fd, (struct sockaddr *)&addr, &len);
 				if(fd < 0)
 					return -1;
+				
 				DEBUG("%s:%d connected", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
 				connection_open(&srv->connections[fd], CLIENT);
 				srv->connections[fd].state = S5_IDENT;
+				
 				event.events = EPOLLIN;
 				event.data.fd = fd;
+				
 				if(epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, fd, &event) < 0)
 					return -1;
 			}
 			else 
 				handle_client(&srv->connections[events[i].data.fd], events[i].events);
+		}
+
+		server_timeout(srv);
+
+		if(!debug) 
+            fprintf(stderr, "UPTIME: %ld secs | OPEN CONNECTIONS: %ld\r",
+                time(NULL) - uptime, srv->open_count - 5);
+		
+	}
+	return 0;
+}
+
+int server_timeout(struct server *srv) 
+{
+	for(int i=5;i < srv->open_count; i++)
+	{
+		if(srv->connections[i].lock)
+			continue;
+
+		if(time(NULL) - srv->connections[i].recv_time >= timeout) {
+			if(srv->connections[i].type == TARGET) {
+				send_reply(&srv->connections[srv->connections[i].dst_fd], REPLY_EXPIRED);
+				connection_close(&srv->connections[srv->connections[i].dst_fd]);
+			}
+			DEBUG("CONNECTION TIMEOUT");
+			connection_close(&srv->connections[i]);
 		}
 	}
 	return 0;

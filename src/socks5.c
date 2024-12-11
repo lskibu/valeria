@@ -32,7 +32,6 @@
 
 extern int debug;
 
-
 int socks5_auth_check(struct connection *conn) 
 {
 	unsigned char buf[512];
@@ -77,16 +76,43 @@ int socks5_auth_check(struct connection *conn)
 
 void handle_client(struct connection *conn, unsigned int flags)
 {
+	int val=0;
+	socklen_t len = 0;
 	if(!conn->open) {
 		DEBUG("Oops! not open");
         return; 
 	}
     if(flags&EPOLLERR || flags&EPOLLRDHUP || flags&EPOLLHUP) {
         DEBUG("handle_client: epoll event reporeted an error\n");
+		if(conn->type == TARGET) {
+			getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &val, &len);
+			switch(val) {
+				case ECONNRESET:
+				case ECONNREFUSED: 
+					send_reply(&conn->srv->connections[conn->dst_fd] , REPLY_REFUSED);
+					break;
+				case EHOSTDOWN:
+				case EHOSTUNREACH:
+					send_reply(&conn->srv->connections[conn->dst_fd] , REPLY_HSTNRCH);
+					break;
+				case ENETDOWN:
+				case ENETRESET:
+				case ENETUNREACH:
+					send_reply(&conn->srv->connections[conn->dst_fd] , REPLY_NETNRCH);
+					break;
+				default: 
+				send_reply(&conn->srv->connections[conn->dst_fd] , REPLY_FAILURE);
+				break;
+			}
+			DEBUG("Failed to connect to target");
+			connection_close(&conn->srv->connections[conn->dst_fd]);
+		}
         connection_close(conn);
         return;
     }
+	
 	connection_lock(conn);
+	
 	if(conn->type==CLIENT) {
 		switch(conn->state) {
 			case S5_IDENT:
@@ -111,8 +137,26 @@ void handle_client(struct connection *conn, unsigned int flags)
 				/* close */
 		}
 	} else {
-		if(proxy_data(conn) < 0)
-            DEBUG("proxy_data failed");
+		if(flags & EPOLLOUT) {
+			if(errno == EINPROGRESS) {
+				errno = 0;
+				DEBUG("In Progress");
+			} else {
+				DEBUG("Target connection success");
+				send_reply(&conn->srv->connections[conn->dst_fd], REPLY_SUCCESS);	
+				conn->srv->connections[conn->dst_fd].state = S5_CONNECT;
+				struct epoll_event ev;
+				ev.events = EPOLLIN;
+				ev.data.fd = conn->fd;
+				if(epoll_ctl(conn->srv->epollfd, EPOLL_CTL_MOD, conn->fd, &ev) < 0)
+					DEBUG("epoll_ctl failed");
+			}
+
+		} else if (flags & EPOLLIN) {
+			if(proxy_data(conn) < 0)
+				DEBUG("proxy_data failed");
+		}
+
 	}
 	connection_unlock(conn);
 }
@@ -125,10 +169,14 @@ int recv_initial_msg(struct connection *conn)
 	int use_auth = 0;
 
 	memset(&msg, 0, sizeof msg);
+
 	len = recv(conn->fd, (char *) &msg, sizeof msg, MSG_DONTWAIT);
-	
+
 	if(len < 0) 
 		return -1;
+	
+	conn->recv_time = time(NULL);
+
 	DEBUG("SOCKS version: %d", msg.version);
 	
 	conn->recv_time = time(NULL);
@@ -171,41 +219,26 @@ int process_request(struct connection *conn)
 	char hostname[256]={0};
 	int fd;
 
-#define REPLY_ERROR(flag) do {\
-		msg1.reply = flag;\
-        len = send(conn->fd, &msg1, sizeof msg1, MSG_DONTWAIT); \
-        if(len < 0) \
-            return -1; \
-        DEBUG("Terminating the connection"); \
-        connection_close(conn); \
-        return 0; \
-    } while(0) ;
-
-
-	struct socks5_reply_msg msg1;
-	
 	DEBUG("Processing request...");
 
-	memset(&msg1, 0, sizeof msg1);
 	memset(&msg, 0, sizeof msg);
 	
 	len = recv(conn->fd, &msg, sizeof msg, MSG_DONTWAIT);
 	
 	if(len < 0)
 		return -1;
-	
+#define REPLY_ERR(code) { \
+			send_reply(conn, REPLY_ADDRERR); \
+            connection_close(conn); \
+            return 0; \
+	}
 	conn->recv_time = time(NULL);
 
 	DEBUG("REQUEST: ver: %d, CMD: %d, ATYP: %d", msg.version,
 		msg.command, msg.addr_type);
 
-	msg1.version = SOCKS5_VERSION;
-	msg1.addr_type = 1;
-	msg1.bind_addr = conn->srv->ip;
-	msg1.bind_port = conn->srv->port;
-
 	if(msg.command != CMD_CONNECT) 
-		REPLY_ERROR(REPLY_CMDNSPR);
+		REPLY_ERR(REPLY_CMDNSPR);
 
 	switch(msg.addr_type) {
 		case ATYP_IPV4:
@@ -223,8 +256,9 @@ int process_request(struct connection *conn)
                 dnsinfo->h_name, dnsinfo->h_addrtype, dnsinfo->h_length, inet_ntoa(*(struct in_addr *) dnsinfo->h_addr));
 					addr_type = dnsinfo->h_addrtype;
 					dst_addr = ((struct in_addr *) dnsinfo->h_addr)->s_addr;
-				} else
-					REPLY_ERROR(REPLY_HSTNRCH);
+				} else 
+					REPLY_ERR(REPLY_HSTNRCH);
+				
 				dst_port = *((in_port_t *) &msg.buffer[len+1]);
 			}
 			break;
@@ -233,15 +267,21 @@ int process_request(struct connection *conn)
 			dst_addr6 = ((struct socks5_request_in6_msg *) &msg)->ipv6_addr;
 			dst_port = ((struct socks5_request_in6_msg *) &msg)->port;
 			break;
-		default: break;
+		default: 
+			DEBUG("Unkown address type");
+			REPLY_ERR(REPLY_ADDRERR);
 	}
+
 	DEBUG("Request processed! addr type: %d", addr_type);
 
+	if(conn->srv->open_count >= conn->srv->open_max)
+		REPLY_ERR(REPLY_FAILURE);
+
 	// try to connect to dst
-	fd = socket(addr_type, SOCK_STREAM, 0);
+	fd = socket(addr_type, SOCK_STREAM|SOCK_NONBLOCK, 0);
 
 	if(fd < 0) 
-		REPLY_ERROR(REPLY_FAILURE);
+		REPLY_ERR(REPLY_FAILURE);
 	
 	memset(&target_addr, 0, sizeof target_addr);
 	memset(&target_addr6 , 0, sizeof target_addr6);
@@ -266,37 +306,25 @@ int process_request(struct connection *conn)
 
 		len = connect(fd, (struct sockaddr *) &target_addr6, sizeof target_addr6);
 	}
-	if(len < 0) {
+	if(errno != EINPROGRESS) {
 		DEBUG("Connection failed");
-		switch (errno) {
-			case ENETUNREACH: REPLY_ERROR(REPLY_NETNRCH);
-			case EHOSTDOWN: REPLY_ERROR(REPLY_HSTNRCH);
-			case ECONNREFUSED: REPLY_ERROR(REPLY_REFUSED);
-			default: REPLY_ERROR(REPLY_REFUSED);
-		}
+		REPLY_ERR(REPLY_FAILURE);
 	}
-
-	DEBUG("SUCCESSFULLY CONNEECTED TO DST ADDR");
 
 	connection_open(&conn->srv->connections[fd], TARGET);
 	
-	msg1.reply = REPLY_SUCCESS;
 
-    len = send(conn->fd, &msg1, sizeof msg1, MSG_DONTWAIT); 
-    if(len < 0) 
-        return -1;
-	
 	conn->dst_fd = fd;
 	conn->srv->connections[fd].dst_fd = conn->fd;
 
-	ev.events = EPOLLIN;
+	ev.events = EPOLLOUT;
 	ev.data.fd = fd;
 
 	if(epoll_ctl(conn->srv->epollfd, EPOLL_CTL_ADD, fd, &ev) < 0)
 		return -1;
 	
-	conn->state = S5_CONNECT;
-#undef REPLY_ERROR
+	conn->state = -1;
+#undef REPLY_ERR
 	return 0;
 }
 
@@ -327,5 +355,25 @@ int proxy_data(struct connection *conn)
             return -1;
         }
 	}
+}
+
+int send_reply(struct connection *conn, int reply)
+{
+	struct socks5_reply_msg msg;
+	int len;
+
+	memset(&msg, 0, sizeof msg);
+	msg.version = SOCKS5_VERSION;
+    msg.addr_type = 1;
+    msg.bind_addr = conn->srv->ip;
+    msg.bind_port = conn->srv->port;
+	msg.reply = reply;
+
+	len = send(conn->fd, &msg, sizeof msg, MSG_DONTWAIT);
+
+	if(len < 0)
+		return -1;
+
+	return 0;
 }
 

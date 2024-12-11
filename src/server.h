@@ -40,7 +40,7 @@ int server_init(struct server *, char *,unsigned short );
 int server_socket_bind(struct server *);
 int server_listen(struct server *);
 int server_start(struct server *);
+int server_timeout(struct server *);
 void server_destroy(struct server **);
-
 
 #endif

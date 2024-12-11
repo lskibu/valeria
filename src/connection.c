@@ -37,29 +37,30 @@ int connection_open(struct connection *conn,int type)
 	conn->open = 1;
 	conn->type = type;
 	conn->recv_time= time(NULL);
-	ATOMIC_INC(&conn->srv->open_count);
+	conn->srv->open_count++;
 	return 0;
 }
 
 void connection_lock(struct connection *conn) 
 {
-	SYNC_LOCK(&conn->lock);
+	conn->lock = 1;
 }
 
 void connection_unlock(struct connection *conn)
 {
-	SYNC_UNLOCK(&conn->lock);
+	conn->lock = 0;
 }
+
 int connection_is_locked(struct connection *conn)
 {
-	return SYNC_IS_LOCKED(&conn->lock);
+	return conn->lock;
 }
 
 int connection_close(struct connection *conn)
 {
 	close(conn->fd);
 	conn->open = 0;
-	ATOMIC_DEC(&conn->srv->open_count);
+	conn->srv->open_count--;
 	return 0;
 }
 int connection_destroy(struct connection **conn)
@@ -68,3 +69,4 @@ int connection_destroy(struct connection **conn)
 	*conn = NULL;
 	return 0;
 }
+

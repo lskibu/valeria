@@ -32,7 +32,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
-#include <pthread.h>
+#include <sys/resource.h>
 #include <getopt.h>
 #include <signal.h>
 #include <errno.h>
@@ -47,7 +47,7 @@
 extern char *optarg;
 extern int optind, opterr, optopt;
 
-int interrupt_flag=0;
+sig_atomic_t interrupt_flag=0;
 int debug=0;
 int timeout = 20;
 time_t uptime;
@@ -56,8 +56,6 @@ void usage();
 void version();
 void daemonize();
 void sigint_handle(int);
-void *timeout_proc(void *);
-void *stats_thread(void *);
 
 int main(int argc,char *argv[])
 {
@@ -74,10 +72,10 @@ int main(int argc,char *argv[])
 	struct server *srv;
 	char listen_addr[256]="127.0.0.1";
 	unsigned short port=1080;
-	pthread_t tid, stid;
 
-	int max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : DEFAULT_MAX_OPEN);
-
+	struct rlimit  rlim;
+	int max_open;
+	
 	while((opt=getopt_long(argc,argv, "hvDdp:a:", long_opts, &long_optind))!=-1) {
 		switch(opt) {
 			case 'h': 
@@ -107,6 +105,17 @@ int main(int argc,char *argv[])
 	if(daemon) 
 		daemonize();
 
+    rlim.rlim_cur = RLIM_INFINITY;
+    rlim.rlim_max = RLIM_INFINITY;
+    //if(getuid() == 0) {
+    //    DEBUG("Running as root");
+        if(setrlimit(RLIMIT_NOFILE, &rlim) < 0);
+            DEBUG("setrlimit() failed");
+    //} else DEBUG("not root!");
+
+	max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : DEFAULT_MAX_OPEN);
+    DEBUG("max_open=%d", max_open);
+
 	if(signal(SIGINT, sigint_handle)==SIG_ERR) 
 		DEBUG("signal() failed");
 
@@ -129,17 +138,9 @@ int main(int argc,char *argv[])
 
 	uptime = time(NULL);
 
-	if(pthread_create(&tid, NULL, timeout_proc, (void *) srv) < 0)
-        DIE("failed to create timeout thread", server_destroy, &srv);
-
-    if(pthread_create(&stid, NULL, stats_thread, (void *) srv) < 0)
-        DIE("failed to create stats thread", server_destroy, &srv)
-
 	if(server_start(srv) < 0)
 		DIE("server_start failed", server_destroy, &srv);
 
-	pthread_join(tid, NULL);
-	pthread_join(stid, NULL);
 	return 0;
 }
 
@@ -205,43 +206,6 @@ void daemonize()
 void sigint_handle(int sig)
 {
 	(void) sig;
-	ATOMIC_INC(&interrupt_flag);
-}
-
-void *timeout_proc(void *args) {
-	struct server *srv = (struct server *) args;
-	for(;;) {
-		if(ATOMIC_GET(&interrupt_flag)) 
-			break;
-
-		for(int i=5;i < srv->open_max; i++) {
-			if(srv->connections[i].open) {
-				if(connection_is_locked(&srv->connections[i]))
-					continue;
-
-				if(time(NULL) - srv->connections[i].recv_time >= (long) timeout ) {
-					DEBUG("Timeout on fd: %d", srv->connections[i].fd);	
-					connection_close(&srv->connections[i]);
-				}
-			}
-		}
-		sleep(1);
-	}
-	pthread_exit(0);
-}
-
-void *stats_thread(void *args) {
-    struct server *srv = (struct server *) args;
-	for(;;) {
-        if(ATOMIC_GET(&interrupt_flag))
-            break;
-		
-		if(!debug)
-			fprintf(stderr, "UPTIME: %ld secs | OPEN CONNECTIONS: %ld\r",
-				time(NULL) - uptime, ATOMIC_GET(&srv->open_count) - 5);
-		
-        sleep(1);
-    }
-    pthread_exit(0);
+	interrupt_flag = 1;
 }
 

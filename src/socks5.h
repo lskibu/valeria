@@ -34,6 +34,7 @@ enum socks5_state {
 	S5_IDENT,
 	S5_AUTH,
 	S5_REQST,
+	S5_REPLY,
 	S5_CONNECT,
 	S5_UDPASS
 };	
@@ -58,7 +59,7 @@ enum  socks5_reply {
 };
 
 enum socks5_addr_type {
-	ATYP_IPV4 = 0,  //o  IP V4 address: X'01'
+	ATYP_IPV4 = 1,  //o  IP V4 address: X'01'
     ATYP_NAME = 3,  //o  DOMAINNAME: X'03'
     ATYP_IPV6 = 4  //o  IP V6 address: X'04'
 };
@@ -125,6 +126,7 @@ int socks5_auth_check(struct connection *);
 void handle_client(struct connection *, unsigned int);
 int recv_initial_msg(struct connection *);
 int process_request(struct connection *);
+int send_reply(struct connection *, int);
 int proxy_data(struct connection *);
 
 #endif 

@@ -1,6 +1,6 @@
 
 CC=gcc
-CFLAGS=-O2 -pthread
+CFLAGS=-O2 -g -ggdb
 output=valeria
 source=$(wildcard src/*.c)
 obj=$(wildcard tmp/*.o)
