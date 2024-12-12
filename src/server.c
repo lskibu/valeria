@@ -161,13 +161,15 @@ int server_timeout(struct server *srv)
 {
 	for(int i=5;i < srv->open_count; i++)
 	{
-		if(srv->connections[i].lock)
+		if(srv->connections[i].lock || !srv->connections[i].open)
 			continue;
 
 		if(time(NULL) - srv->connections[i].recv_time >= timeout) {
 			if(srv->connections[i].type == TARGET) {
-				send_reply(&srv->connections[srv->connections[i].dst_fd], REPLY_EXPIRED);
-				connection_close(&srv->connections[srv->connections[i].dst_fd]);
+				if(srv->connections[srv->connections[i].dst_fd].open) {
+					send_reply(&srv->connections[srv->connections[i].dst_fd], REPLY_EXPIRED);
+					connection_close(&srv->connections[srv->connections[i].dst_fd]);
+				}
 			}
 			DEBUG("CONNECTION TIMEOUT");
 			connection_close(&srv->connections[i]);

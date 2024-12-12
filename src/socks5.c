@@ -105,7 +105,8 @@ void handle_client(struct connection *conn, unsigned int flags)
 				break;
 			}
 			DEBUG("Failed to connect to target");
-			connection_close(&conn->srv->connections[conn->dst_fd]);
+			if(conn->srv->connections[conn->dst_fd].open)
+				connection_close(&conn->srv->connections[conn->dst_fd]);
 		}
         connection_close(conn);
         return;
@@ -146,7 +147,7 @@ void handle_client(struct connection *conn, unsigned int flags)
 				send_reply(&conn->srv->connections[conn->dst_fd], REPLY_SUCCESS);	
 				conn->srv->connections[conn->dst_fd].state = S5_CONNECT;
 				struct epoll_event ev;
-				ev.events = EPOLLIN;
+				ev.events = EPOLLIN|EPOLLRDHUP;
 				ev.data.fd = conn->fd;
 				if(epoll_ctl(conn->srv->epollfd, EPOLL_CTL_MOD, conn->fd, &ev) < 0)
 					DEBUG("epoll_ctl failed");
