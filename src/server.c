@@ -137,7 +137,7 @@ int server_start(struct server *srv)
 				connection_open(&srv->connections[fd], CLIENT);
 				srv->connections[fd].state = S5_IDENT;
 				
-				event.events = EPOLLIN;
+				event.events = EPOLLIN|EPOLLRDHUP;
 				event.data.fd = fd;
 				
 				if(epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, fd, &event) < 0)

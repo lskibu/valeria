@@ -69,8 +69,8 @@ int socks5_auth_check(struct connection *conn)
 
 	if(data[1]) 
 		connection_close(conn);
-
-	conn->state = S5_REQST;
+	else
+		conn->state = S5_REQST;
 	return 0;
 }
 
