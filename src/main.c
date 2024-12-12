@@ -115,7 +115,10 @@ int main(int argc,char *argv[])
 		return -1;
 	}
 
-	max_open = (sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : DEFAULT_MAX_OPEN);
+	max_open = sysconf(_SC_OPEN_MAX) > 0 ? 
+				(sysconf(_SC_OPEN_MAX) < DEFAULT_MAX_OPEN ? 
+				sysconf(_SC_OPEN_MAX) : DEFAULT_MAX_OPEN) 
+				: DEFAULT_MAX_OPEN;
     DEBUG("max_open=%d", max_open);
 
 	if(signal(SIGINT, sigint_handle)==SIG_ERR) 
@@ -124,7 +127,7 @@ int main(int argc,char *argv[])
 	if((srv = server_create(max_open))==NULL) {
 		DEBUG("server_create failed");
 		return -1;
-	};
+	}
 	
 	if(server_init(srv, listen_addr, port) < 0) 
 		DIE("server_init failed", server_destroy, &srv);

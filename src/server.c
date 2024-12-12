@@ -159,7 +159,7 @@ int server_start(struct server *srv)
 
 int server_timeout(struct server *srv) 
 {
-	for(int i=5;i < srv->open_count; i++)
+	for(int i=5;i < srv->open_max; i++)
 	{
 		if(srv->connections[i].lock || !srv->connections[i].open)
 			continue;
