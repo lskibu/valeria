@@ -45,7 +45,8 @@ extern int uptime;
 struct server* server_create(size_t max_open)
 {
 	struct server *srv = (struct server *) calloc(1, sizeof(struct server));
-	if(srv==NULL) return NULL;
+	if(srv==NULL) 
+		return NULL;
 	srv->open_max = max_open;
 	return srv;
 }
@@ -150,7 +151,7 @@ int server_start(struct server *srv)
 		server_timeout(srv);
 
 		if(!debug) 
-            fprintf(stderr, "UPTIME: %ld secs | OPEN CONNECTIONS: %ld\r",
+            fprintf(stderr, "UPTIME: %ld secs | OPEN CONNECTIONS: %d\r",
                 time(NULL) - uptime, srv->open_count - 5);
 		
 	}

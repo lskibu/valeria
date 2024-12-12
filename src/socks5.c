@@ -51,9 +51,9 @@ int socks5_auth_check(struct connection *conn)
 	conn->recv_time = time(NULL);
 	
 	ulen = (int) buf[1];
-	strncpy(uname, buf+2, ulen);
+	strncpy(uname,(char *) &buf[2], ulen);
 	plen = (int) buf[2+ulen];
-	strncpy(pwd, buf+2+ulen+1, plen);
+	strncpy(pwd,(char *) &buf[2+ulen+1], plen);
 
 	DEBUG("Client auth: %s:%s\n", uname, pwd);
 	
@@ -211,7 +211,7 @@ int process_request(struct connection *conn)
 	struct sockaddr_in target_addr;
 	struct sockaddr_in6 target_addr6;
 	struct socks5_request_msg msg;
-	unsigned int len, reply;
+	int len;
 	int addr_type = AF_INET;
 	in_addr_t dst_addr = INADDR_ANY;
 	in_port_t dst_port = 0;
@@ -356,6 +356,7 @@ int proxy_data(struct connection *conn)
             return -1;
         }
 	}
+	return 0;
 }
 
 int send_reply(struct connection *conn, int reply)

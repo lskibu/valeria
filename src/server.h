@@ -30,8 +30,8 @@ struct server {
 	int epollfd;
 	in_addr_t ip;
 	in_port_t port;
-	size_t open_count;
-	size_t open_max;
+	int open_count;
+	int open_max;
 	struct connection *connections;
 };
 
