@@ -53,12 +53,12 @@ int socks5_auth_check(struct connection *conn)
 	ulen = (int) buf[1];
 	strncpy(uname, buf+2, ulen);
 	plen = (int) buf[2+ulen];
-	strncpy(pwd, buf+2+ulen, plen);
+	strncpy(pwd, buf+2+ulen+1, plen);
 
 	DEBUG("Client auth: %s:%s\n", uname, pwd);
 	
 	data[0]=SOCKS5_VERSION;
-	if(!strcmp(uname, SOCKS5_UNAME) && !strcmp(pwd, SOCKS5_PWD))
+	if(!strcmp(uname, SOCKS5_UNAME) && !strcmp(pwd, SOCKS5_PWD)) 
 		data[1]=0;
 	else
 		data[1]=255;
@@ -67,7 +67,7 @@ int socks5_auth_check(struct connection *conn)
 	if(len < 0)
 		return -1;
 
-	if(!data[1])
+	if(data[1]) 
 		connection_close(conn);
 
 	conn->state = S5_REQST;
