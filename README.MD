@@ -1,4 +1,4 @@
-### Valeria v0.2.0
+### Valeria v0.2.2
 
 A socks v5 proxy server written in C language for native support
 Runs on linux only for now...

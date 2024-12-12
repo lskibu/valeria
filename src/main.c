@@ -163,7 +163,7 @@ void usage()
 
 void version()
 {
-	fprintf(stderr, "valeria v0.1 - socks5 server that runs on win32/linux\n");
+	fprintf(stderr, "valeria v0.2.2 socks5 server that runs on win32/linux\n");
 	fprintf(stderr, "Copyright (C) 2024 lskibu\n");
 }
 
