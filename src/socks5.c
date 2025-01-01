@@ -101,8 +101,8 @@ void handle_client(struct connection *conn, unsigned int flags)
 					send_reply(&conn->srv->connections[conn->dst_fd] , REPLY_NETNRCH);
 					break;
 				default: 
-				send_reply(&conn->srv->connections[conn->dst_fd] , REPLY_FAILURE);
-				break;
+					send_reply(&conn->srv->connections[conn->dst_fd] , REPLY_FAILURE);
+					break;
 			}
 			DEBUG("Failed to connect to target");
 			if(conn->srv->connections[conn->dst_fd].open)
@@ -111,8 +111,6 @@ void handle_client(struct connection *conn, unsigned int flags)
         connection_close(conn);
         return;
     }
-	
-	connection_lock(conn);
 	
 	if(conn->type==CLIENT) {
 		switch(conn->state) {
@@ -134,8 +132,7 @@ void handle_client(struct connection *conn, unsigned int flags)
 				break;
 			case S5_UDPASS:
 				break;
-			default:
-				/* close */
+			default: break;
 		}
 	} else {
 		if(flags & EPOLLOUT) {
@@ -159,14 +156,13 @@ void handle_client(struct connection *conn, unsigned int flags)
 		}
 
 	}
-	connection_unlock(conn);
 }
 
 int recv_initial_msg(struct connection *conn)
 {
 	struct socks5_version_identifier_msg msg;
 	struct socks5_method_select_msg msg1;
-	int len;
+	int len, i;
 	int use_auth = 0;
 
 	memset(&msg, 0, sizeof msg);
@@ -181,7 +177,7 @@ int recv_initial_msg(struct connection *conn)
 	DEBUG("SOCKS version: %d", msg.version);
 	
 	conn->recv_time = time(NULL);
-	for(int i=0;i < msg.nmethods; i++)
+	for( i=0;i < msg.nmethods; i++)
 		if(msg.methods[i]==METHOD_PASSWD) 
 			use_auth = 1;
 
@@ -339,7 +335,7 @@ int proxy_data(struct connection *conn)
 		return 0;
 	}
 	while(len==sizeof buffer) {
-		memset(buffer, 0, sizeof buffer);
+		//memset(buffer, 0, sizeof buffer);
 		len = recv(conn->fd, buffer, sizeof buffer, MSG_DONTWAIT);
 		if(len < 0) {
 			DEBUG("proxy_data failed while recv()");

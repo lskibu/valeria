@@ -45,7 +45,7 @@
 #define DEBUG(msg, ...)	{\
 	if(debug) { \
 		if(errno) { \
-			fprintf(stderr, "%s:%s:%d - "msg": fatal error: %s\n", __func__, __FILE__, __LINE__, ##__VA_ARGS__, strerror(errno)); \
+			fprintf(stderr, "[ERROR] func:%s in %s:%d --> "msg" (%s)\n", __func__, __FILE__, __LINE__, ##__VA_ARGS__, strerror(errno)); \
 			errno=0;\
 		} \
 		else \

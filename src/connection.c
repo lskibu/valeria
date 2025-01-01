@@ -41,21 +41,6 @@ int connection_open(struct connection *conn,int type)
 	return 0;
 }
 
-void connection_lock(struct connection *conn) 
-{
-	conn->lock = 1;
-}
-
-void connection_unlock(struct connection *conn)
-{
-	conn->lock = 0;
-}
-
-int connection_is_locked(struct connection *conn)
-{
-	return conn->lock;
-}
-
 int connection_close(struct connection *conn)
 {
 	close(conn->fd);

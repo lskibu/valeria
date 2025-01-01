@@ -39,14 +39,10 @@ struct connection {
 	int state;
 	int type;
 	time_t recv_time;
-	int lock;
 };
 
 struct connection *connection_new(int);
 int connection_open(struct connection *, int type);
-void connection_lock(struct connection *);
-void connection_unlock(struct connection *);
-int connection_is_locked(struct connection *);
 int connection_close(struct connection *);
 int connection_destroy(struct connection **);
 

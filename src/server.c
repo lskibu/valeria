@@ -53,12 +53,13 @@ struct server* server_create(size_t max_open)
 
 int server_init(struct server *srv, char *addr,unsigned short port)
 {
+	int i;
 	srv->ip = inet_addr(addr);
 	srv->port = htons(port);
 	srv->connections = (struct connection *) calloc(srv->open_max, sizeof(struct connection));
 	if(srv->connections == NULL)
 		return -1;
-	for(int i=0;i < srv->open_max; i++) {
+	for(i=0;i < srv->open_max; i++) {
 		srv->connections[i].fd = i;
 		srv->connections[i].srv = srv;
 	}
@@ -108,7 +109,7 @@ int server_start(struct server *srv)
 {
 	struct epoll_event events[1024], event;
 	struct sockaddr_in addr;
-	int fd;
+	int fd, i;
 	socklen_t len;
 	
 	for(;;) {
@@ -122,7 +123,7 @@ int server_start(struct server *srv)
 		if(nfds < 0 && errno!=EINTR)
 			return -1;
 
-		for(int i=0;i < nfds; i++) {
+		for(i=0;i < nfds; i++) {
 			
 			if(events[i].data.fd==srv->fd) {
 				
@@ -160,9 +161,10 @@ int server_start(struct server *srv)
 
 int server_timeout(struct server *srv) 
 {
-	for(int i=5;i < srv->open_max; i++)
+	int i;
+	for(i=5;i < srv->open_max; i++)
 	{
-		if(srv->connections[i].lock || !srv->connections[i].open)
+		if(!srv->connections[i].open)
 			continue;
 
 		if(time(NULL) - srv->connections[i].recv_time >= timeout) {

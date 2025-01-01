@@ -35,6 +35,7 @@
 #include <sys/resource.h>
 #include <getopt.h>
 #include <signal.h>
+#include <sched.h>
 #include <errno.h>
 
 #include "socks5.h"
@@ -51,11 +52,13 @@ sig_atomic_t interrupt_flag=0;
 int debug=0;
 int timeout = 20;
 time_t uptime;
+int parallel = 0;
 
 void usage();
 void version();
 void daemonize();
 void sigint_handle(int);
+int parallelize();
 
 int main(int argc,char *argv[])
 {
@@ -64,7 +67,8 @@ int main(int argc,char *argv[])
 	{"daemon", no_argument, NULL, 'D'},
 	{"debug", no_argument, NULL, 'd'},
 	{"port", required_argument, NULL, 'p'},
-	{"address", required_argument, NULL, 'a'}};
+	{"address", required_argument, NULL, 'a'},
+	{"parallel", no_argument, NULL, 'j'}};
 	int opt;
 	int daemon = 0;
 	int long_optind=0;
@@ -74,9 +78,9 @@ int main(int argc,char *argv[])
 	unsigned short port=1080;
 
 	struct rlimit  rlim;
-	int max_open;
+	int max_open, i;
 	
-	while((opt=getopt_long(argc,argv, "hvDdp:a:", long_opts, &long_optind))!=-1) {
+	while((opt=getopt_long(argc,argv, "hvDdp:a:j", long_opts, &long_optind))!=-1) {
 		switch(opt) {
 			case 'h': 
 				usage(); 
@@ -97,6 +101,9 @@ int main(int argc,char *argv[])
 			case 'p': 
 				port = (unsigned short)atol(optarg);
 				break;
+			case 'j':
+				parallel = 1;
+				break;
 			default:
 				usage();	
 				exit(EXIT_FAILURE);
@@ -104,6 +111,8 @@ int main(int argc,char *argv[])
 	}
 	if(daemon) 
 		daemonize();
+
+	signal(SIGCHLD, SIG_IGN);
 
     if(getrlimit(RLIMIT_NOFILE, &rlim) < 0) {
         DEBUG("getrlimit() failed");
@@ -115,6 +124,9 @@ int main(int argc,char *argv[])
 		return -1;
 	}
 
+    if(parallel)
+        if(parallelize() < 0)
+            DEBUG("parallelize failed");
 	max_open = sysconf(_SC_OPEN_MAX) > 0 ? 
 				(sysconf(_SC_OPEN_MAX) < DEFAULT_MAX_OPEN ? 
 				sysconf(_SC_OPEN_MAX) : DEFAULT_MAX_OPEN) 
@@ -132,8 +144,8 @@ int main(int argc,char *argv[])
 	if(server_init(srv, listen_addr, port) < 0) 
 		DIE("server_init failed", server_destroy, &srv);
 
-	for(int i=0;i < 5; i++)
-        connection_open(&srv->connections[i], -1);
+	for(i=0;i < 5; i++)
+        	connection_open(&srv->connections[i], -1);
 
 	if(server_socket_bind(srv) < 0)
 		DIE("server_socket_bind failed", server_destroy, &srv);
@@ -152,19 +164,20 @@ int main(int argc,char *argv[])
 void usage()
 {
 	fprintf(stderr, "Usage: ./valeria [OPTIONS]\n");
+	fprintf(stderr, "Description: Valeria is a socks5 server for Linux\n");
 	fprintf(stderr, "Options:\n");
 	fprintf(stderr, "\t-D,--daemon \t\tDaemonize the server (run in bg)\n");
 	fprintf(stderr, "\t-a,--address <addr>\tBind address.(default: localhost)\n");
 	fprintf(stderr, "\t-p,--port <port>   \tBind port. (default: 1080)\n");
 	fprintf(stderr, "\t-d,--debug  \t\tPrint debug messages (if -D no message is printed)\n");
+	fprintf(stderr, "\t-j,--parallel\t\tRun multiple instances of the server\n");
 	fprintf(stderr, "\t-v,--version\t\tPrint program version then exit.\n");
 	fprintf(stderr, "\t-h,--help   \t\tPrint this help message then exit\n");
 }
 
 void version()
 {
-	fprintf(stderr, "valeria v0.2.2 socks5 server that runs on win32/linux\n");
-	fprintf(stderr, "Copyright (C) 2024 lskibu\n");
+	fprintf(stderr, "valeria v0.2.2\n");
 }
 
 
@@ -214,3 +227,26 @@ void sigint_handle(int sig)
 	interrupt_flag = 1;
 }
 
+int parallelize()
+{
+	int i;
+	pid_t pid;
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+    if (sched_setaffinity(getpid(), sizeof set, &set) < 0)
+        return -1;
+	CPU_CLR(0, &set);
+	for(i=1; i < sysconf(_SC_NPROCESSORS_ONLN); i++) {
+		pid = fork();
+		if(pid==-1)
+			return -1;
+		if(!pid)
+			break;
+		CPU_SET(i, &set);
+		if (sched_setaffinity(pid, sizeof set, &set) < 0)
+			return -1;
+		CPU_CLR(i, &set);
+	}
+	return 0;
+}
