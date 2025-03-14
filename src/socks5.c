@@ -105,9 +105,9 @@ void handle_client(struct connection *conn, unsigned int flags)
 					break;
 			}
 			DEBUG("Failed to connect to target");
-			if(conn->srv->connections[conn->dst_fd].open)
-				connection_close(&conn->srv->connections[conn->dst_fd]);
 		}
+		if(conn->srv->connections[conn->dst_fd].open)
+			connection_close(&conn->srv->connections[conn->dst_fd]);
         connection_close(conn);
         return;
     }
